@@ -656,6 +656,75 @@ This is a deliberate trade-off. A well-designed persistent agent with proper
 rules, access controls, and monitoring is safer than a permission-gated agent
 that blocks on prompts nobody sees.
 
+## PreToolUse Hooks for File Protection
+
+Even with `--dangerously-skip-permissions`, you may want soft guardrails around
+sensitive files. A `PreToolUse` hook can warn the agent (or block it) when it
+attempts to edit credentials, secrets, or critical configuration.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/your-agent/hooks/file-guard.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook script checks the file path against a pattern list:
+
+```bash
+#!/usr/bin/env bash
+# file-guard.sh -- warn on edits to sensitive files
+FILE_PATH=$(echo "$CLAUDE_TOOL_INPUT" | \
+  grep -oE '"file_path"\s*:\s*"[^"]*"' | head -1 | \
+  sed 's/.*: *"//;s/"$//')
+
+[ -z "$FILE_PATH" ] && exit 0
+
+BASENAME=$(basename "$FILE_PATH")
+
+case "$BASENAME" in
+  credentials.json|*.env|*.env.*|*.pem|*.key|*.p12|*.keystore)
+    echo "SENSITIVE FILE: $BASENAME -- exercise caution"
+    exit 0  # warn but allow (use exit 2 to block)
+    ;;
+esac
+
+exit 0
+```
+
+### Blocking vs Warning
+
+The hook's exit code determines behavior:
+- **Exit 0** — allow the operation (with optional warning text)
+- **Exit 2** — block the operation and show the message to the agent
+
+For full-autonomy setups where the agent runs unattended, prefer **warnings
+(exit 0)** over blocks (exit 2). A blocked tool call stalls the agent when
+no one is present to override. A warning lets the agent use judgment —
+which is what you trained it to do with your rules and safety configuration.
+
+### Important: Hooks Bypass the Permission Flag
+
+**`PreToolUse` hooks fire regardless of `--dangerously-skip-permissions`.**
+This is by design — hooks are operator-level guardrails that sit above the
+permission system. If your hook returns exit code 2, the tool call is blocked
+even in full-bypass mode.
+
+This means hooks are the one mechanism that can still stop the agent when
+running with skip-permissions. Use this power deliberately — a blocking hook
+on a commonly-edited file type will stall autonomous operation.
+
 ## Common Pitfalls
 
 **Over-permissive defaults.** Start restrictive and open up. It's much easier

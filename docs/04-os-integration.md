@@ -493,6 +493,55 @@ Here is how a complete session lifecycle works with all the OS integration piece
           └─ starts new claude session (back to step 2)
 ```
 
+## Managing Workers at Scale
+
+Once you have more than a handful of launchd services, you need a way to
+manage them without memorizing service labels. A slash command that wraps
+`launchctl` operations gives the agent (and the operator) a clean interface.
+
+### The `/worker` Command Pattern
+
+Create a command file that teaches the agent how to manage your worker fleet:
+
+```markdown
+# /worker -- Worker Operations
+
+## Usage
+- `/worker` or `/worker status` -- show all workers and their state
+- `/worker restart <name>` -- restart a specific worker
+- `/worker logs <name>` -- tail recent logs
+- `/worker stop <name>` -- stop a worker
+- `/worker start <name>` -- start a worker
+
+## Implementation
+launchctl list | grep com.agent  -- show all services
+launchctl unload <plist>         -- stop a service
+launchctl load <plist>           -- start a service
+
+## Reading the Output
+- PID column: a number means running, `-` means loaded but not active
+- Exit status: 0 = clean exit, non-zero = crashed
+- Report naturally: "TTS daemon restarted, PID 1234"
+```
+
+### Worker Inventory
+
+Include a table of known workers in the command file so the agent knows
+what each service does:
+
+```markdown
+| Service | Label | Description |
+|---------|-------|-------------|
+| TTS Daemon | com.agent.tts-daemon | Text-to-speech on localhost |
+| Presence | com.agent.presence | Camera-based presence detection |
+| Message Watcher | com.agent.msg-watcher | Queue processing |
+| Health Check | com.agent.healthcheck | Cardiac cycle monitoring |
+```
+
+This inventory also serves as documentation — when something breaks at 2 AM,
+the agent knows which service label maps to which function without grepping
+through plist files.
+
 ## Common Pitfalls
 
 **Forgetting launchd environment.** launchd jobs do not inherit your shell environment. If a hook works in your terminal but not via launchd, the PATH is probably wrong. Always set it explicitly.

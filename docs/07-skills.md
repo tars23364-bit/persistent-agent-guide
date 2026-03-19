@@ -426,6 +426,60 @@ should know. Keep this focused -- don't dump a textbook.]
 - [Safety-critical callouts]
 ```
 
+## Building Skills From Research
+
+When the agent needs to learn a new technical domain (an API, a protocol, a
+tool), the temptation is to have a subagent research the topic and produce a
+complete skill file. This sounds efficient but produces a subtle problem: the
+resulting skill file looks authoritative but lacks the operational knowledge
+that makes existing skills trustworthy.
+
+Every good skill file was *earned*. The machining skill knows about specific
+post-processor quirks because someone hit the wall. The HPC skill knows which
+package manager works because someone tried the wrong one first. A subagent
+reading official documentation cannot manufacture this kind of calibrated,
+failure-informed knowledge.
+
+### The Split: Reference Docs vs Skill Files
+
+The pattern that works is a two-tier approach:
+
+**Tier 1: Automated reference docs.** A subagent researches the domain and
+produces a comprehensive reference document — API surfaces, function signatures,
+code examples, known limitations. Save this to `references/`. This is verifiable,
+mechanical, and exactly what subagents are good at. It captures 80% of the
+token-saving value (no re-researching every session).
+
+**Tier 2: Scaffold skill files.** The same subagent produces a *skeleton* skill
+file with frontmatter, section headers, and a brief overview derived from the
+research. But the operational sections — gotchas, communication calibration,
+domain-specific patterns — are left as placeholders. Mark it explicitly:
+
+```yaml
+---
+name: some-domain
+status: scaffold
+description: "Domain API integration — built from research, not experience yet"
+last-verified: 2026-03-19
+---
+```
+
+The skill file fills in over time as the operator actually uses the domain with
+the agent. Real gotchas replace placeholder text. Communication calibration
+emerges from actual conversations. The reference doc feeds the skill file across
+sessions — don't collapse that natural progression into a single subagent call.
+
+### Why This Matters
+
+The distinction isn't about conciseness vs detail. It's about **source of
+authority**. A reference doc's authority comes from the upstream documentation.
+A skill file's authority comes from experience. Conflating the two degrades the
+trust level of your entire skills system — the agent starts treating summarized
+documentation as equivalent to hard-won operational knowledge, and the quality
+bar silently erodes.
+
+Automate the reference docs. Earn the skill files.
+
 ## Skills, Rules, and Memory: When to Use What
 
 Three systems store agent knowledge. They serve different purposes:

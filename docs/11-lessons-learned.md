@@ -465,6 +465,30 @@ implementation:
   perfectly valid approach in a different context. Human review on promotions
   is worth the small cost.
 
+## Editing Claude Code's Own Settings Requires the CLI
+
+Claude Code protects its own configuration files — specifically
+`~/.claude/settings.json` — even when `--dangerously-skip-permissions` is
+active. If the agent uses the Edit tool to directly modify this file, it
+triggers a permission prompt that blocks autonomous operation.
+
+**The fix:** Use the `claude` CLI or the `update-config` skill to make settings
+changes instead of directly editing the file. These go through the proper
+channel and don't trigger the prompt.
+
+```bash
+# This triggers a permission prompt even with --dangerously-skip-permissions:
+# Edit ~/.claude/settings.json  ← DON'T DO THIS
+
+# This works cleanly:
+# Use the update-config skill or claude CLI commands
+```
+
+This matters most for agents running unattended — a permission prompt at 3 AM
+with nobody at the terminal stalls the agent until someone intervenes. If your
+agent ever needs to modify its own hook configuration, MCP servers, or other
+settings programmatically, route through the CLI.
+
 ## Starting From Scratch: Priority Order
 
 If you're building a persistent agent from zero, here's the order that
