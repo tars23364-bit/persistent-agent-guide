@@ -40,6 +40,9 @@ Developers who are already using Claude Code and want to push it beyond single-s
 | [09](docs/09-task-management.md) | **Task Management** | File-based tasks, reconciliation, lifecycle |
 | [10](docs/10-self-improvement.md) | **Self-Improvement** | Learnings, reflections, pattern promotion |
 | [11](docs/11-lessons-learned.md) | **Lessons Learned** | What worked, what didn't, pitfalls |
+| [12](docs/12-multi-agent.md) | **Multi-Agent Patterns** | Peer agents, message broker, consent gates, dossier study mode |
+| [13](docs/13-autonomy.md) | **Autonomy & Authority** | Standing orders, authority tiers, async-commitment, the board |
+| [14](docs/14-backups.md) | **Backups & Durability** | rsync snapshots, offsite memory copy, exclusions, verification |
 
 ## Diagrams
 
@@ -67,6 +70,8 @@ If you're building from scratch, the recommended order is:
 4. **Context Management** (03) — add threshold warnings before you hit compaction
 5. **Safety** (08) — set guardrails early
 6. Everything else as needed
+
+Chapters 12–14 are **advanced patterns** — reach for them only once the core system is solid. Autonomy & authority (13) and backups (14) become relevant as you let the agent act unattended; multi-agent (12) is for the rare case where a second agent earns its place. Don't build these on day one.
 
 See [Lessons Learned](docs/11-lessons-learned.md) for a more detailed build order and the reasoning behind it.
 

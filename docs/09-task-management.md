@@ -390,6 +390,103 @@ When completing a task, update both sides:
 2. Mark the external system entry as done (via CLI/API).
 3. The file stays on disk until the next reflection cycle archives it.
 
+## The Task Lock: Crash Recovery for In-Flight Work
+
+Task files track *commitments* — multi-session work with due dates and external
+visibility. They are deliberately not the right tool for "I am three steps into a
+refactor right now and the session might restart." That mid-task state is too
+granular and too short-lived for a task file, but losing it to a restart is
+exactly the kind of thing that wastes a fresh session re-deriving where it was.
+
+The **task lock** fills that gap. It is a single file that holds the *next
+concrete action* for whatever substantive task is currently in flight. Write it
+when you start such a task, update it as you progress, and delete it when you
+finish. If a session restarts for any reason — context hygiene, a crash, a
+compaction event — the startup hook reads the lock and the next session resumes
+immediately instead of asking "what were we doing?"
+
+```
+~/.agent/state/task.lock
+```
+
+### Format
+
+Simple key-value, one per line. The fields are chosen so a cold session can act
+on them without any other context:
+
+```
+TASK: Refactor the startup hook to consolidate context gathering
+STEP: Move the attunement query into the main hook; test a cold start
+CONTEXT: hooks/session-startup.py; the old attunement script is scripts/attune.py
+TIMESTAMP: 2026-03-15T14:30-07:00
+```
+
+- **TASK** — the task name, one line.
+- **STEP** — the *next concrete action*: what to **do** next, not what was just
+  done. This is the most important field. "Move the attunement query into the
+  main hook" is actionable; "worked on the hook" is not.
+- **CONTEXT** — pointers (file paths, doc sections, job IDs) the resuming session
+  needs. Pointers, not prose — the detail lives in the files it names.
+- **TIMESTAMP** — ISO-8601, so the startup hook can judge staleness.
+
+### How the Resume Works
+
+The `SessionStart` hook (see [Context Management](03-context-management.md))
+checks for the lock and, if it exists and is recent (say, under 24 hours old),
+injects it as a **directive to resume**, not as background information:
+
+```python
+def read_task_lock():
+    lock = Path.home() / ".agent" / "state" / "task.lock"
+    if not lock.exists():
+        return None
+    fields = dict(
+        line.split(":", 1) for line in lock.read_text().splitlines() if ":" in line
+    )
+    ts = fields.get("TIMESTAMP", "").strip()
+    # Stale locks (>24h) are likely abandoned — surface, don't auto-resume.
+    if ts and (datetime.now(tz) - parse(ts)) > timedelta(hours=24):
+        return f"## Stale Task Lock (review)\n{lock.read_text()}"
+    return f"## RESUME TASK\nStart working on STEP immediately.\n\n{lock.read_text()}"
+```
+
+The crucial behavior is on the agent's side: **the lock is the instruction.** On
+startup with a fresh lock, the agent starts working on `STEP` immediately — it
+does not present the lock and ask the operator what to do. The operator already
+authorized this work in the previous session; re-confirming it on every restart
+defeats the entire point of seamless recovery.
+
+### Lock vs. Task File
+
+They answer different questions and coexist:
+
+| | Task file | Task lock |
+|---|-----------|-----------|
+| Question answered | *What are my commitments?* | *Where am I in the current task?* |
+| Lifespan | Days to weeks | Minutes to hours |
+| Count | Many, one per commitment | One, the active task |
+| Granularity | Whole task + history | The single next step |
+| On restart | Loaded as the task index | Loaded as a resume directive |
+
+A task lock points *at* a task file when the in-flight work belongs to a tracked
+commitment (`CONTEXT: ~/.agent/tasks/startup-refactor.md`), but plenty of
+substantive work — a focused refactor, a one-session investigation — gets a lock
+without ever warranting a task file.
+
+### When to Use It
+
+- **Write a lock** for any task that spans more than a few turns — anything
+  you'd mention in a handoff note. The cost is one small file; the payoff is a
+  restart that loses nothing.
+- **Don't bother** for single-shot work: a quick question, a one-line fix, a
+  message reply. The lock is overhead there.
+- **Update `STEP` as you go.** A lock whose `STEP` reflects what you finished an
+  hour ago resumes you in the wrong place — worse than no lock, because it reads
+  as current.
+- **Delete it on completion.** A leftover lock from yesterday's finished task
+  will try to resume work that's already done. (The staleness check is a
+  backstop, not a substitute for cleaning up.)
+
 ## Practical Tips
 
 ### Don't Over-Track

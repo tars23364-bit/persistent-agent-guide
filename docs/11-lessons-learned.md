@@ -187,6 +187,91 @@ The patterns in this guide are designed to be extractable — file-based state,
 clear directory structure, documented protocols. They don't need to be abstract
 to be reusable.
 
+## A Second Agent Is Worth It — but Only After the First One Is Solid
+
+This is the nuance to the rule above, and the two are easy to confuse. "Don't
+build for hypothetical scale" killed an early *multi-agent dispatcher* — an
+abstraction built before a single agent worked. That was correct; it deserved to
+die. But much later, after the single-agent system had been stable for months, a
+*second concrete agent* earned its place — and that was also correct.
+
+The difference is everything:
+
+- The dispatcher was infrastructure for imagined future agents. The second agent
+  was a specific machine doing a specific bounded job: long-horizon autonomous
+  research that ran for hours and would have wrecked the primary agent's context
+  and presence if done inline.
+- The dispatcher was built *first*, as scaffolding. The second agent was built
+  *last*, once there was a concrete recurring job that a sub-agent couldn't cover
+  (it had to survive restarts and run on its own schedule).
+
+What made it work in practice: a dumb, file-backed message broker between the two
+(the same file-queue discipline as the operator relay), a `wake`/broadcast
+distinction so the agents didn't interrupt each other constantly, and one agent
+acting as the **consent signal** for the other's routine permission prompts so
+the operator wasn't dragged into every gated edit. None of that is exotic — it's
+the patterns already in this guide, pointed sideways at a peer instead of at the
+operator. See [Multi-Agent Patterns](12-multi-agent.md) for the full shape.
+
+The lesson, stated precisely: **don't build multi-agent abstractions before you
+have one agent working; do reach for a second concrete agent when a bounded,
+recurring, restart-surviving job clearly returns more than the standing cost of a
+second machine.** Premature is the abstraction, not the agent count.
+
+## Granting Autonomy Needs an Explicit, One-Way Authority Channel
+
+The first instinct when you want an agent to act unattended is a blanket
+permission — run it with all prompts skipped and hope. That works until the
+night it infers something wrong and force-pushes a branch or deletes a directory
+it "thought" was scratch. Probabilistic inference plus irreversible actions plus
+nobody watching is a bad combination.
+
+What actually held up was **scoped, operator-granted authority that the agent
+cannot grant itself.** A small state file the agent reads but never writes says
+which projects it may act on and at what risk tier; a startup hook surfaces the
+active grants; the agent operates inside them and reports back. The one rule that
+makes the whole thing trustworthy is that authority flows *one way* — only the
+operator activates, tightens, or loosens a grant. The moment the agent can edit
+its own permissions, the permissions are decorative.
+
+Two adjacent lessons came out of running this:
+
+- **Silent failure is worse than no autonomy.** An autonomous action that fails
+  quietly — and an agent "promise" to follow up that nothing was actually
+  scheduled to do — both erode trust faster than an honest "I couldn't." Every
+  unattended action needs a loud failure path, and every future-action claim
+  needs a real scheduler or watcher attached *in the same turn* (the agent does
+  not run between your messages, so "I'll check back in ten minutes" with nothing
+  attached is a guaranteed broken promise).
+- **An agent drafting its own limits over-restricts.** Asked to propose its own
+  authority boundaries, the agent piles on restrictions — backwards, since the
+  goal is to *unlock* useful action. Forcing it to name both a blocked-case and a
+  permitted-case for each restriction counter-weights the reflex.
+
+The full treatment — tiers, the async-commitment protocol, and the
+non-interrupting "board" for reporting autonomous decisions — is in
+[Autonomy & Authority](13-autonomy.md).
+
+## Back Up the Memory Graph, Not the Checkpoints
+
+The agent's source is in git and its model checkpoints are reproducible, so the
+first backup attempt — naively rsyncing the whole tree — was both wasteful and,
+on a RAM-constrained machine, fatal: macOS's `openrsync` builds the entire file
+list in memory before copying, and a tree full of multi-GB checkpoints was enough
+for the OS to kill the job before it transferred a byte. Excluding the large,
+regenerable directory dropped the backup by an order of magnitude and made it
+finish in minutes.
+
+The real lesson underneath the crash: **the irreplaceable asset is the memory
+graph, not the bulk.** Code re-clones, checkpoints re-train or re-download, but
+the months of accreted preferences, decisions, and insights in the memory store
+exist on exactly one disk and can't be rebuilt. Back that up deliberately — a
+nightly LAN mirror for fast full recovery *plus* a small daily offsite copy of
+just the memory store — exclude secrets the same way `.gitignore` does, and
+remember that a `--delete` mirror protects against disk death but not against a
+bad write, so keep dated offsite snapshots too. And test a real restore: a backup
+you've never restored is a hope. See [Backups & Durability](14-backups.md).
+
 ## Session Restarts Are a Feature, Not a Failure
 
 Early on, I treated session restarts as a cost — something to minimize. The
