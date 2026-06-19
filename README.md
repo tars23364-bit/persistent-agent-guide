@@ -62,6 +62,7 @@ Starter files to bootstrap your own agent:
 - [`templates/skills/anti-sycophancy.md`](templates/skills/anti-sycophancy.md) — enforced-directness mode
 - [`templates/skills/devils-advocate.md`](templates/skills/devils-advocate.md) — adversarial pre-commit debate
 - [`templates/skills/quarantine-scout.md`](templates/skills/quarantine-scout.md) — sandboxed analysis of untrusted content
+- [`templates/skills/session-continuity.md`](templates/skills/session-continuity.md) — task lock + handoff + pulse for surviving restarts
 
 ## Where to Start
 

@@ -608,7 +608,7 @@ Most skills are domain knowledge — what the agent knows about *your* machining
 shop, *your* medical history, *your* codebase. Those don't generalize, and you
 shouldn't try to copy them. But a handful of skills are *behavioral* — they
 encode how the agent should reason, not what it knows — and those travel well.
-Three that have earned their place through heavy use are included as starter
+Four that have earned their place through heavy use are included as starter
 templates in `templates/skills/`. Each is invoked as a slash command and each
 exists to counter a specific, predictable failure mode.
 
@@ -644,11 +644,25 @@ README that payload is in its context. Sandbox isolation plus model diversity
 plus an audit pass are three independent barriers between "untrusted input" and
 "trusted context."
 
-The common thread: each is a small, explicit ritual that makes a known cognitive
-or security weakness harder to walk into. They compose — the devil's-advocate
-adversary runs *with* anti-sycophancy active, and the scout leans on the same
-plan-mode sub-agent pattern as the debate. Adapt the paths and model choices to
-your setup; the structure is what matters.
+### Session Continuity ([`session-continuity.md`](../templates/skills/session-continuity.md))
+
+Three artifacts at three timescales that make a restart cheap: a **task lock**
+(the next concrete step, mid-task, so a session that dies resumes exactly where
+it was), a **handoff** (pointers + the *why* behind decisions + surprises, in
+past tense, for the next session and the operator), and an optional **pulse**
+(one-line same-day texture). **Failure mode it counters:** a persistent agent
+restarts constantly — context fills, tasks finish, the machine reboots — and
+without continuity discipline every restart is a cold start that quietly kills
+long-running work. With it, restarting becomes routine hygiene you reach for
+*proactively* to clear a degrading context window, not a loss event you dread.
+
+The common thread: each is a small, explicit ritual that makes a predictable
+weakness — sycophancy, lone-agent rationalization, prompt injection, lost
+context across restarts — harder to walk into. They compose: the devil's-advocate
+adversary runs *with* anti-sycophancy active, the scout leans on the same
+plan-mode sub-agent pattern as the debate, and continuity is what lets the other
+three survive the restart that clears a full context window. Adapt the paths and
+model choices to your setup; the structure is what matters.
 
 ## Scaling Considerations
 
