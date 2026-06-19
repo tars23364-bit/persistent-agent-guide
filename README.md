@@ -55,7 +55,7 @@ Developers who are already using Claude Code and want to push it beyond single-s
 
 Starter files to bootstrap your own agent:
 
-- [`templates/claude-md.md`](templates/claude-md.md) — CLAUDE.md boot loader
+- [`templates/CLAUDE.md.template`](templates/CLAUDE.md.template) — CLAUDE.md boot loader
 - [`templates/rules/`](templates/rules/) — persona, protocols, safety, operator rule files (auto-loaded from `.claude/rules/`)
 - [`templates/hooks/session-startup.py`](templates/hooks/session-startup.py) — minimal startup hook
 - [`templates/skills/example-skill.md`](templates/skills/example-skill.md) — skill file template
