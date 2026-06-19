@@ -59,6 +59,9 @@ Starter files to bootstrap your own agent:
 - [`templates/rules/`](templates/rules/) — persona, protocols, safety, operator rule files (auto-loaded from `.claude/rules/`)
 - [`templates/hooks/session-startup.py`](templates/hooks/session-startup.py) — minimal startup hook
 - [`templates/skills/example-skill.md`](templates/skills/example-skill.md) — skill file template
+- [`templates/skills/anti-sycophancy.md`](templates/skills/anti-sycophancy.md) — enforced-directness mode
+- [`templates/skills/devils-advocate.md`](templates/skills/devils-advocate.md) — adversarial pre-commit debate
+- [`templates/skills/quarantine-scout.md`](templates/skills/quarantine-scout.md) — sandboxed analysis of untrusted content
 
 ## Where to Start
 
