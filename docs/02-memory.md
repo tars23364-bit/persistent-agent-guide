@@ -312,6 +312,99 @@ MEMORY.md carries one line per active project, pointing to its README:
 
 Do not copy project state into MEMORY.md. Read the README on demand, when you branch into that project's work. The handoff (written at restart) lists which READMEs the next session should consult and what the immediate next action is -- it does not retransmit project state.
 
+## The Reference Shelf: Stable Ground Truth
+
+The memory tiers above handle *evolving* knowledge -- L1 tracks what is hot right now, L2 accumulates preferences and insights over time, and project READMEs capture per-project state as it changes. There is a fourth category that fits none of those: knowledge that is **stable, operational, and needs to be citable** -- environment facts about your machines and network, and runbooks for recurring procedures.
+
+This knowledge belongs in a separate home. We call ours the reference shelf (the live implementation is named Atlas, if you want a concrete reference point).
+
+### Why a Separate Home
+
+The distinction matters:
+
+| Layer | Changes how often | What you do with it |
+|-------|------------------|---------------------|
+| L2 (graph memory) | Frequently -- new insights every session | Recall against; fades if unused |
+| Project READMEs | Per project -- as work evolves | Read before branching into a project |
+| Reference shelf | Rarely -- when environment changes | Check and cite before acting on known procedures |
+
+Putting environment facts in graph memory creates two problems. First, they never decay -- a memory about which SSH port a host uses does not fade after a few weeks of non-use, which is exactly what decay is supposed to do. Second, they are not citable -- when the agent derives an SSH command from a graph memory result, there is no stable path another agent or a human can point to and verify. The reference shelf is just files on disk. The path is the citation.
+
+Putting runbooks in project READMEs creates a different problem: runbooks are cross-cutting. The procedure for renewing OAuth on a headless host does not belong to any single project -- it is environment ops, used whenever the need arises. Mixing it into a project README obscures it.
+
+The reference shelf separates stable ground truth from evolving state. That separation buys two things:
+
+- **Single-writer trust.** One agent owns and writes the shelf for its primary host. Peer agents read but do not write. There is no concurrent-write contention, no merge conflict, no stale override. Trust is proportional to write discipline.
+- **Cross-agent portability.** The shelf is markdown with a uniform `INDEX.md` traversal contract. Any agent -- any model, any harness, any host -- can read it with no model-specific affordances. An agent that cannot call a tool or run a query can still `Read` a file.
+
+### Structure
+
+A minimal reference shelf looks like this:
+
+```
+reference/
+├── INDEX.md          # Root: summary, status, contents list, recent changes
+├── CHANGELOG.md      # Append-only. One line per change: date + path + description
+├── system/
+│   ├── INDEX.md      # Overview of system branch
+│   ├── INFO.md       # Hardware, OS, compute specs
+│   ├── NETWORK.md    # Hosts, IPs, SSH aliases, topology
+│   ├── ACCESS.md     # How to reach what (pointers to secrets, never secrets)
+│   └── QUIRKS.md     # Discovered environment misbehaviors; append-only
+└── ops/
+    ├── INDEX.md      # Index of all runbooks
+    ├── renew-auth-headless.md   # Renew auth on a headless host via VNC
+    ├── launch-gpu-training.md  # Submit a batch training job to your compute cluster
+    └── bulk-transfer.md        # Large file transfer between hosts over direct link
+```
+
+Every `INDEX.md` follows the same shape (the contract that makes traversal uniform):
+
+1. **Summary** -- one paragraph on what this branch covers
+2. **Status** -- current state, or N/A
+3. **Contents** -- each file/folder with a one-line description and link
+4. **Recent changes** -- the last 3-5 entries from `CHANGELOG.md` relevant to this branch
+5. **Cross-refs** -- links to related branches or external docs
+
+The shape does not change. An agent that has read one `INDEX.md` knows how to read any other.
+
+### What Goes Here
+
+The membership test (from the live spec): *Could a stranger reading just this entry act on it correctly without the backstory?* If yes, it belongs on the shelf. If it needs narrative, it goes elsewhere.
+
+**Good reference shelf content:**
+- Machine specs, hostnames, SSH aliases, network topology
+- Access patterns (how to reach a host, which credential to use -- pointer only, never the credential itself)
+- Known environment quirks and workarounds ("this service needs 15 seconds after reboot before it responds")
+- Step-by-step runbooks for recurring procedures that do not belong to any single project
+
+**Does not belong here:**
+- Operator preferences, decisions, insights -- those are L2, they evolve and decay
+- Project status and phase -- that is the project README
+- Transient state (a job is currently running, a service is currently down) -- that is file-based state
+- Secrets -- the shelf carries pointers ("use the keychain entry named X"), never the secret itself
+
+### Write Discipline
+
+The shelf only stays trustworthy if it is updated when the environment changes. When you resolve an environmental surprise -- a service moved, a hostname changed, a quirk was discovered -- the resolution includes updating the relevant shelf entry. Not optional. A shelf that is sometimes stale is worse than no shelf, because the agent stops trusting it.
+
+The corollary: check the shelf *before* acting on a known procedure, not after. This pairs with the "ground before modify" discipline -- check installed reality (the shelf) before improvising. If the shelf does not have the answer, add it after you discover it. That is how it stays current.
+
+Append-only files (`QUIRKS.md`, `CHANGELOG.md`) get new entries, not overwrites. The record of what was true before is part of the value -- it explains why the current state is what it is.
+
+### When to Build It
+
+You do not need a reference shelf on day one. The signal that it is time:
+
+- You find yourself re-deriving SSH commands or network paths from memory or scattered notes
+- A runbook lives in your head (or a chat log) and you have executed it more than twice
+- A peer agent (or a second session of the main agent) needs environment facts that only you have ground truth on
+- You want a human to be able to audit what the agent knows about the environment without reading graph memory exports
+
+Start with a flat `reference/` directory and a single `INDEX.md`. Add `system/` entries as you formalize what you already know. Add runbooks to `ops/` as procedures recur. The shelf grows from necessity, not upfront design.
+
+---
+
 ## Infrastructure: File-Based State
 
 The simplest and most reliable layer. Plain files on disk, read and written by hooks and scripts. Not a memory tier -- it is plumbing that supports the tiers above.
@@ -492,6 +585,8 @@ Rules of thumb:
 | Cross-session open questions | L1 (MEMORY.md) | Visible until answered or promoted to L2 |
 | Session scratchpad | L1 (MEMORY.md) | Temporary, wiped after promotion scan |
 | Per-project status, phases, open questions | Per-project README | Source of truth for project state; read on demand |
+| Environment facts, host specs, network topology | Reference shelf | Stable, citable, single-writer; check before recurring ops |
+| Recurring procedure runbooks | Reference shelf (ops/) | Cross-cutting -- not owned by any project; citable path |
 | Operator preferences | L2 (Graph memory) | Semantic recall, accumulated over time |
 | Past decisions + rationale | L2 (Graph memory) | Queried when relevant, not always loaded |
 | System configuration facts | L2 (Graph memory) | Queried on demand, not burned into context |
