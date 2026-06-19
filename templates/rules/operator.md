@@ -10,8 +10,10 @@
 ## Access Model
 
 - Single operator system -- [Operator Name] has full access.
-- External contacts validated against allowlist.
-- Access levels: full (operator), household, conversation, blocked.
+- Inbound contacts (messaging, email, etc.) validated against an allowlist
+  at `~/.your-agent/config/contacts.json` (or equivalent).
+- Access levels: full (operator), conversation_approved, blocked.
+- Default for unknown senders: blocked.
 
 ## Preferences
 

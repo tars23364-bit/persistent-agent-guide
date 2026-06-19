@@ -3,9 +3,11 @@
 A persistent agent makes the same kinds of mistakes a human does — it forgets
 lessons, repeats errors, and develops blind spots. The difference is that an
 agent can build systematic infrastructure to catch and correct these patterns.
-This chapter covers three interlocking mechanisms: a learnings log for capturing
-corrections in real time, a reflection cycle for daily self-assessment, and a
-promotion pipeline that graduates recurring patterns into permanent rules.
+This chapter covers four interlocking mechanisms: a learnings log for capturing
+corrections in real time, a reflection cycle for daily self-assessment, a
+promotion pipeline that graduates recurring patterns into permanent rules, and a
+self-upgrade policy that lets the agent improve its own configuration within
+defined bounds.
 
 ## The Problem
 
@@ -25,9 +27,10 @@ repeat it tomorrow.
 ```
 Session (real-time)
   │
-  ├─→ ~/.agent/learnings/LEARNINGS.md    # Corrections, knowledge gaps
-  ├─→ ~/.agent/learnings/ERRORS.md       # Tool failures worth learning from
-  └─→ ~/.agent/learnings/FEATURE_REQUESTS.md  # Capability gaps
+  ├─→ ~/.agent/learnings/LEARNINGS.md         # Corrections, knowledge gaps
+  ├─→ ~/.agent/learnings/ERRORS.md            # Tool failures worth learning from
+  ├─→ ~/.agent/learnings/FEATURE_REQUESTS.md  # Capability gaps
+  └─→ ~/.agent/learnings/HEALS.md             # Verify-before-persist recoveries
         │
         ▼
 Reflection (daily, scheduled)
@@ -40,6 +43,10 @@ Reflection (daily, scheduled)
 Promotion (operator-approved)
   │
   └─→ .claude/rules/learned-patterns.md   # Permanent behavioral rules
+
+Self-Upgrade (autonomous, within bounds)
+  │
+  └─→ ~/.agent/upgrades.log               # Audit trail of autonomous changes
 ```
 
 ## The Learnings Log
@@ -63,6 +70,14 @@ specific triggers:
 **FEATURE_REQUESTS.md** — Capability gaps:
 - The operator asks for something the agent can't do yet
 - A workflow would clearly benefit from a tool that doesn't exist
+
+**HEALS.md** — Verify-before-persist recoveries:
+- A scheduled or automated action was about to assert something wrong, and a
+  verification step caught it before the wrong assertion became durable
+- Examples: a false-positive alert suppressed before it fired, a misclassified
+  status caught by a dual-signal check, a pre-commit gate that tripped and
+  prevented a bad write
+- Log the attempt, what caught it, the recovery, and a Pattern-Key
 
 ### What NOT to Log
 
@@ -100,8 +115,7 @@ is for local development only.
 - Source: correction
 - Pattern-Key: build.release-vs-debug
 - Recurrence-Count: 1
-- First-Seen: 2026-04-15
-- Last-Seen: 2026-04-15
+- First-Seen / Last-Seen: 2026-04-15
 - Related: none
 ```
 
@@ -233,7 +247,7 @@ if [[ -f "$DELIVERED_FILE" ]] && \
 fi
 
 # 2. Gather inputs into a temp file
-#    - Learnings files (LEARNINGS.md, ERRORS.md, FEATURE_REQUESTS.md)
+#    - Learnings files (LEARNINGS.md, ERRORS.md, FEATURE_REQUESTS.md, HEALS.md)
 #    - Today's log entries (grep for TARGET_DATE in each .log file)
 #    - Session transcripts modified today
 #    Cap each source (10KB per learnings file, 20KB per transcript)
@@ -296,7 +310,7 @@ Write a reflection with these sections:
 - Skills or references that should be expanded
 
 ## Learnings Review
-- Scan LEARNINGS.md and ERRORS.md entries
+- Scan LEARNINGS.md, ERRORS.md, and HEALS.md entries
 - Flag entries with Recurrence-Count >= 3, across 2+ sessions,
   within 30 days — these are promotion candidates
 - For each candidate, draft a short rule for learned-patterns.md
@@ -409,6 +423,58 @@ reasons:
 
 This is a deliberate friction point. The cost (a few seconds of operator
 review) is negligible compared to the risk of a bad rule becoming permanent.
+
+## Self-Upgrade Autonomy
+
+Beyond logging and promotion, the system can go one step further: the agent
+may autonomously apply improvements to its own configuration without waiting
+for operator review.
+
+### What Qualifies
+
+The agent can self-upgrade:
+
+- **Efficiency improvements** — shorter prompts, deduplication, token
+  reduction, cleaner file structure
+- **Bug fixes** — broken sequences, incorrect behavior, stale references
+- **Pattern promotion** — learnings that have already met the recurrence
+  threshold and been approved
+- **Workflow improvements** — better tool usage, faster paths, reduced
+  duplication
+
+### What Does NOT Qualify
+
+Some changes must be flagged for operator review:
+
+- Changes to access controls or safety rules
+- New external integrations or MCP server connections
+- Anything that changes how the operator interacts with the system
+- Removing capabilities or features
+
+The distinction is roughly: "makes an existing thing work better" is
+autonomous; "changes the boundary of what the system does or who controls
+it" is not.
+
+### Tracking Self-Upgrades
+
+Every self-upgrade gets a log entry in a dedicated upgrades file:
+
+```
+YYYY-MM-DD HH:MM | file_changed | one-line description
+```
+
+This log is surfaced in the morning brief ("since last brief: N
+self-upgrades") and in the next natural git commit. The operator sees what
+changed without being interrupted for approval.
+
+### Why This Works
+
+The key insight is that the authority boundary is stable even when the
+specific rules change. The agent can't grant itself new permissions or
+remove safety rules — those gates are structural. But within that boundary,
+routine maintenance (cleaning up stale references, improving prompts,
+promoting approved patterns) is overhead, not risk. Requiring human approval
+for every cleanup is friction without value.
 
 ## Connecting the Pieces
 

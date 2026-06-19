@@ -54,23 +54,100 @@ A backup of an agent that touches API keys, tokens, or network device credential
 
 ## Architecture
 
-Two targets, two purposes. A nightly full-tree snapshot to a second machine on the LAN gives you fast, whole-system recovery. A daily copy of just the memory store to an offsite target protects the one asset you can never rebuild against a site-level loss (theft, fire, both machines on the same surge).
+Three layers, three purposes. Together they cover the failure modes that actually
+happen.
 
 ```
 PRIMARY MACHINE (~/your-agent, ~/.agent, memory store, working dirs)
    │
-   ├── nightly  ─── rsync over ssh ───►  BACKUP HOST (second machine on LAN)
-   │   (full tree, minus excludes)        /home/user/agent-backup/
-   │                                      → fast full recovery
+   ├── continuous ── git auto-push ────►  PRIVATE REMOTE (GitHub / self-hosted)
+   │   (source tree, on every commit)     → fast code recovery, zero cost
    │
-   └── daily   ─── copy memory only ──►  OFFSITE TARGET (object storage / cloud drive)
-       (graph store snapshot)             → survives loss of both LAN machines
+   ├── nightly ──── rsync over ssh ────►  PEER HOST (second machine on network)
+   │   (full tree, minus excludes)        /home/user/agent-backup/
+   │                                      → fast full recovery, same building
+   │
+   └── daily ───── encrypted archive ──►  CLOUD DRIVE (offsite)
+       (state + memory, gpg-encrypted)    → survives loss of both local machines
                                           → the irreplaceable asset, doubly protected
 ```
 
-The LAN snapshot is broad and fast to restore from but lives in the same building. The offsite copy is narrow (just the memory graph) but survives a disaster that takes out the whole site. Together they cover the two failure modes that actually happen: a single disk dies (restore from LAN) and a site-level loss (restore memory from offsite, rebuild the rest from git).
+The git auto-push layer is nearly free and handles the source tree continuously —
+no cron needed, just a hook or post-commit script. The peer-host rsync is broad
+and fast to restore from but lives in the same building. The encrypted cloud
+snapshot is narrow (the irreplaceable state) but survives a disaster that takes
+out the whole site. Together they cover: a single disk dies (restore from peer
+host), a site-level loss (restore memory from cloud, rebuild source from git),
+and an accidental bad commit (git history is the rollback).
 
-## The rsync Snapshot
+### Why three layers instead of two
+
+The previous two-layer model (LAN + offsite) left a gap: the source tree got one
+nightly rsync copy, but a bad commit that broke the agent mid-session had no fast
+rollback. Git auto-push fills that gap cheaply — the remote is both a backup and
+a revert surface. The encrypted cloud snapshot replaces a generic "object storage"
+placeholder with a concrete answer: GPG-encrypted archive pushed to a cloud drive,
+with a private key escrowed on both machines so either can decrypt.
+
+The three layers have non-overlapping failure modes, which is the point.
+
+## Layer 1: Git Auto-Push
+
+The agent source tree is a git repository. Every commit the agent makes during
+normal operation is already a versioned snapshot. All you have to add is a job
+that pushes those commits to a private remote automatically, without waiting for
+a human to run `git push`.
+
+```bash
+#!/usr/bin/env bash
+# git-autopush.sh — push any local branches ahead of their remote
+set -euo pipefail
+
+REPO="${HOME}/your-agent"
+LOG="${HOME}/.agent/logs/git-autopush.log"
+mkdir -p "$(dirname "$LOG")"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
+
+cd "$REPO"
+
+# Find branches ahead of their upstream and push each one
+AHEAD=$(git branch -r --no-merged HEAD 2>/dev/null | wc -l || echo 0)
+git for-each-ref --format='%(refname:short) %(upstream:trackshort)' refs/heads \
+    | while read -r branch track; do
+        if [[ "$track" == *">"* ]] || git log "origin/$branch...$branch" \
+           --oneline 2>/dev/null | grep -q .; then
+            log "pushing $branch"
+            git push origin "$branch" 2>&1 | tee -a "$LOG" || {
+                log "FAILED push $branch"
+                exit 1
+            }
+        fi
+      done
+
+# Verify: confirm remote SHA matches local HEAD on the current branch
+LOCAL=$(git rev-parse HEAD)
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+REMOTE=$(git ls-remote origin "refs/heads/$BRANCH" | awk '{print $1}')
+if [[ "$LOCAL" != "$REMOTE" ]]; then
+    log "FAILED divergence after push: local=$LOCAL remote=$REMOTE"
+    exit 1
+fi
+
+log "OK — $BRANCH up to date on remote"
+```
+
+Run this on a schedule (e.g. every few hours, or triggered by the agent's normal
+session shutdown hook). The verification step — confirming the remote SHA matches
+local HEAD — is what turns the push into a confirmed backup, not just a hope. A
+divergence means the push silently failed; surface it via your push-notification
+channel.
+
+Two notes on scope: (1) push only to **private** remotes — a git push to a public
+repo is a potential secrets leak and needs a separate decision. (2) Use the same
+exclude discipline you apply to rsync: large model checkpoints and training
+artifacts should live in `.gitignore`, not in the repo getting pushed.
+
+## Layer 2: The rsync Snapshot
 
 A single bash script, run nightly by launchd. It rsyncs each source directory to a matching subdir on the backup host, applies the exclude list, logs a per-source summary, and records a `FAILED` line on any non-zero exit so failures are never silent.
 
@@ -168,50 +245,108 @@ exit $OVERALL
 - **`--stats`** — emits the file-count and byte-count summary the script greps for. This is your verification surface (next section).
 - **Per-source subdirs** — mirroring each source into its own named subdir (`agent-src/`, `agent-state/`, `memory/`) keeps the backup browsable and lets a partial restore target one tree without touching the others.
 
-## Offsite Memory Snapshot
+## Layer 3: Encrypted Cloud Snapshot
 
-The LAN snapshot already includes the memory store, but it lives in the same building as the primary. The memory graph is the one thing worth a second, independent copy offsite. Because it is small (a single graph DB file or a compact directory), a daily push to object storage or a cloud drive costs almost nothing.
+The peer-host rsync already includes the memory store, but it lives in the same building as the primary. The state directory and memory graph are worth a second, independent copy offsite. Because they are small (the memory graph is a compact database, the state dir is text files), a daily push to a cloud drive costs almost nothing.
+
+**Encrypt before upload.** A cloud drive backup of an agent that handles API keys and private notes will faithfully copy all of that to a third-party service unless you encrypt first. GPG asymmetric encryption is the practical choice: encrypt the archive to a key escrowed on both local machines so either can decrypt; the cloud sees only ciphertext.
+
+The secret-scan gate matters here too: before archiving, verify no plaintext credential files are included. The archive should contain the state and memory you cannot rebuild — not the secrets you can rotate.
 
 ```bash
 #!/usr/bin/env bash
-# memory-offsite.sh — daily snapshot of the graph memory store to an offsite target
+# state-offsite.sh — daily encrypted snapshot of agent state to a cloud drive
 set -euo pipefail
 
+STATE_DIR="${HOME}/.agent"
 MEM_DIR="${HOME}/.agent-memory"
 STAMP=$(date '+%Y-%m-%d')
-ARCHIVE="/tmp/agent-memory-${STAMP}.tar.gz"
-LOG_FILE="${HOME}/.agent/logs/memory-offsite.log"
+ARCHIVE="/tmp/agent-state-${STAMP}.tar.gz"
+ENCRYPTED="/tmp/agent-state-${STAMP}.tar.gz.gpg"
+LOG_FILE="${HOME}/.agent/logs/state-offsite.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 
-log "memory-offsite START"
+log "state-offsite START"
 
-# Compact the store into a single dated archive
-tar -czf "$ARCHIVE" -C "$(dirname "$MEM_DIR")" "$(basename "$MEM_DIR")"
+# Archive state + memory, excluding secrets and bulk
+tar -czf "$ARCHIVE" \
+    --exclude='secrets' \
+    --exclude='credentials' \
+    --exclude='*.sock' \
+    -C "$(dirname "$STATE_DIR")" "$(basename "$STATE_DIR")" \
+    -C "$(dirname "$MEM_DIR")" "$(basename "$MEM_DIR")"
 
-# Push to the offsite target. Replace this command with your provider's CLI
-# (object storage CLI, a cloud-drive uploader, or a custom MCP-backed tool).
-# The point is: one small file, one daily upload, kept for N days of history.
-if upload-to-offsite "$ARCHIVE" "agent-memory/${STAMP}.tar.gz"; then
-    log "OK — uploaded agent-memory/${STAMP}.tar.gz ($(du -h "$ARCHIVE" | cut -f1))"
-    rm -f "$ARCHIVE"
+# Encrypt to a key both local machines can decrypt
+# Replace KEYID with your GPG key fingerprint
+gpg --batch --yes --encrypt -r YOUR_BACKUP_KEYID -o "$ENCRYPTED" "$ARCHIVE"
+rm -f "$ARCHIVE"
+
+# Upload to cloud drive — adapt to your provider's CLI or MCP tool.
+# The point: one small encrypted file, one daily upload, dated for point-in-time recovery.
+if upload-to-cloud "backups/state/${STAMP}.tar.gz.gpg" "$ENCRYPTED"; then
+    log "OK — uploaded state-${STAMP}.tar.gz.gpg ($(du -h "$ENCRYPTED" | cut -f1))"
+    rm -f "$ENCRYPTED"
 else
-    log "FAILED — offsite upload of ${STAMP}.tar.gz"
-    rm -f "$ARCHIVE"
+    log "FAILED — cloud upload of ${STAMP}.tar.gz.gpg"
+    rm -f "$ENCRYPTED"
     exit 1
 fi
 
-log "memory-offsite END"
+log "state-offsite END"
 ```
 
-Two design choices worth calling out:
+Three design choices worth calling out:
 
-- **Dated archives, not a single overwriting file.** Keeping `2026-03-14.tar.gz`, `2026-03-15.tar.gz`, ... gives you point-in-time recovery. If a corruption slips into the store and you don't notice for two days, you can still restore from before it happened. Prune to a rolling window (e.g. last 30 daily + last 12 monthly) so the offsite cost stays bounded.
-- **Generalize the upload step.** Whether the offsite target is object storage, a cloud drive, or a custom integration is irrelevant to the strategy. What matters is that it is *off the LAN* and the upload *fails loudly* on error.
+- **Encrypt before upload.** Plaintext agent state on a cloud drive is a secrets leak waiting for a breach. Encrypt to a key you control; escrow the private key on both local machines. The cloud sees only ciphertext.
+- **Dated archives, not a single overwriting file.** Keeping `2026-03-14.tar.gz.gpg`, `2026-03-15.tar.gz.gpg`, ... gives you point-in-time recovery. If a corruption slips into the store and you don't notice for two days, you can restore from before it happened. Prune to a rolling window (e.g. last 30 daily) so the cloud cost stays bounded.
+- **Secret-scan before archiving.** Exclude credential dirs and token stores from the tar explicitly. Never leave a gap where a plaintext secret can slip into a cloud upload — the exclusion list and the encryption are complementary, not alternatives.
+
+## Storage Watchdog
+
+With three backup layers running, one new question arises: what happens when a
+backup destination runs out of space? The right answer is not "the backup silently
+starts failing" — it's a proactive warning that lets you act before the space
+runs out.
+
+A small daily watchdog checks free space on each destination and sends a push
+notification when any crosses a low threshold:
+
+```python
+#!/usr/bin/env python3
+# storage-watchdog.py — daily disk-space check for all backup destinations
+import shutil, subprocess, sys
+
+DESTINATIONS = [
+    ("local /",        "/"),
+    # Add remote checks via paramiko or ssh subprocess as needed
+]
+THRESHOLD_PCT = 10.0  # warn below 10% free
+
+def check_local(path):
+    total, used, free = shutil.disk_usage(path)
+    pct_free = (free / total) * 100
+    return pct_free, free // (1024**3)  # percent free, GB free
+
+def notify(msg):
+    # Replace with your push-notification CLI or MCP call
+    subprocess.run(["push-notify", "--title", "STORAGE WARN", "--message", msg])
+
+for label, path in DESTINATIONS:
+    pct, gb = check_local(path)
+    if pct < THRESHOLD_PCT:
+        notify(f"{label}: {pct:.1f}% free ({gb}GB). Buy more storage.")
+```
+
+Key design choice: **one alert per threshold crossing per destination per day**,
+never a storm. The watchdog fires at most once daily per destination (dedup guard
+same as the backup scripts), and only when the threshold is crossed. Routine
+"all clear" runs are silent. You should hear from the watchdog rarely; when you
+do hear from it, it matters.
 
 ## Scheduling with launchd
 
-Both jobs run on a schedule via launchd (systemd timers on Linux — same shape, see [OS Integration](04-os-integration.md)). Here is the nightly snapshot:
+All three jobs run on a schedule via launchd (systemd timers on Linux — same shape, see [OS Integration](04-os-integration.md)). Here is the nightly peer-host snapshot:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -307,7 +442,7 @@ Silent backup failure is the worst kind. The disk dies six weeks after the backu
 
 **Trusting `--delete` to protect you from yourself.** A mirror defends against disk failure, not against a bad write or an accidental `rm`. If the primary's memory store gets corrupted, the next sync corrupts the backup. Keep dated/versioned offsite snapshots so you can roll back in time.
 
-**One target instead of two.** A LAN-only backup dies with the building. A cloud-only backup is slow to restore a whole system from and may not hold everything. Use both: LAN for fast full recovery, offsite for the irreplaceable memory graph.
+**One target instead of three.** A LAN-only backup dies with the building. A cloud-only backup is slow to restore a whole system from. And neither replaces git auto-push for the source tree — git gives you a revert surface, not just a recovery surface. Use all three: git for the code continuously, peer host for fast full recovery, cloud for the irreplaceable memory graph with point-in-time history.
 
 **Never testing a restore.** The most common failure mode is a backup that has been "working" for months but produces an unrestorable archive (wrong paths, a partial copy, an exclude that quietly dropped the actual data). Restore it on a schedule. Until you have read the data back successfully, you do not have a backup.
 
@@ -318,11 +453,14 @@ Silent backup failure is the worst kind. The disk dies six weeks after the backu
 | Decision | Choice | Trade-off |
 |----------|--------|-----------|
 | What to back up | Irreplaceable state only | Faster, smaller, must trust git/lockfiles for the rest |
-| Mirror vs. accumulate | `--delete` mirror to LAN | Clean and exact; no protection against bad writes |
-| LAN vs. offsite | Both, different scopes | Two jobs to maintain; covers both disk-death and site-loss |
-| Offsite scope | Memory store only | Tiny and cheap; full recovery still needs git + LAN |
-| Schedule | launchd nightly + dedup guard | Misses runs during sleep; the guard prevents double-runs |
+| Source tree layer | Git auto-push, continuous | Free; also a revert surface; must exclude checkpoints from git |
+| Mirror vs. accumulate | `--delete` mirror to peer host | Clean and exact; no protection against bad writes |
+| Peer host vs. offsite | Both, different scopes | Three jobs to maintain; covers disk-death, site-loss, and bad commits |
+| Offsite scope | Encrypted state + memory | Small and cheap; full recovery still needs git + peer host |
+| Offsite encryption | GPG, key escrowed on both hosts | Either machine can decrypt; cloud sees only ciphertext |
+| Schedule | launchd + dedup guard | Misses runs during sleep; the guard prevents double-runs |
 | rsync flavor | GNU `rsync`, not `openrsync` | One install on each host; avoids the file-list RAM spike |
+| Space monitoring | Dedicated watchdog, threshold alerts only | Silent on success; loud only when action is needed |
 | Verification | Stats delta + quarterly restore | Manual discipline; the only thing that proves the backup works |
 
-The throughline: a backup is not the rsync command, it is the *restore you have actually performed*. Optimize the strategy around the asset you cannot rebuild — the memory graph — and make every failure loud. Everything else the agent owns is already in git or already reproducible.
+The throughline: a backup is not the rsync command, it is the *restore you have actually performed*. Optimize the strategy around the asset you cannot rebuild — the memory graph — encrypt everything that leaves the building, and make every failure loud. The source tree is already covered by git; let that layer be its own recovery surface and focus the backup jobs on what git doesn't hold.

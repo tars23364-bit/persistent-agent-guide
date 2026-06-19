@@ -28,17 +28,17 @@ External Sources                Queue                    Agent
 ────────────────               ─────                    ─────
 iMessage ──────┐
                │    Watcher/     JSON files
-Telegram ──────┤──► Webhook ──► ~/.agent/queue/ ──► /process-queue
+Other channel ─┤──► Webhook ──► ~/.agent/queue/ ──► /process-queue
                │    processes                        command
-Email relay ───┘                                         │
+Email/bridge ──┘                                         │
                                                          ▼
                                                     Agent processes
                                                     each message
                                                          │
                                            ┌─────────────┼────────────┐
                                            ▼             ▼            ▼
-                                      iMessage       Telegram     Pushover
-                                      reply          reply        alert
+                                      iMessage       Channel      Pushover
+                                      reply          reply         alert
 ```
 
 The pattern has three stages:
@@ -54,8 +54,8 @@ message:
 ```
 ~/.agent/queue/
 ├── 1710962400-imessage-alice.json
-├── 1710962415-telegram-12345.json
-└── 1710962430-imessage-bob.json
+├── 1710962415-imessage-bob.json
+└── 1710962430-channel-12345.json
 ```
 
 Filename convention: `{unix_timestamp}-{source}-{sender_id}.json`
@@ -187,33 +187,35 @@ def poll_loop():
 
 ### Sending Replies
 
-Sending iMessages programmatically on macOS is possible through AppleScript or
-Shortcuts:
-
-```python
-# Using AppleScript
-import subprocess
-
-def send_imessage(to, text):
-    script = f'''
-    tell application "Messages"
-        set targetService to 1st account whose service type = iMessage
-        set targetBuddy to participant "{to}" of targetService
-        send "{text}" to targetBuddy
-    end tell
-    '''
-    subprocess.run(["osascript", "-e", script])
-```
-
-Or via a Shortcut triggered from the command line:
+Sending iMessages programmatically on macOS is most reliably done via a
+pre-built Shortcut. AppleScript works for simple cases but is fragile for
+group chats and attachments:
 
 ```bash
-# Using a pre-built Shortcut called "Send iMessage"
-shortcuts run "Send iMessage" --input-type text --input "$RECIPIENT|||$MESSAGE"
+# Using a per-recipient Shortcut (e.g., "Send iMessage to Alice")
+shortcuts run "Send iMessage to Alice" --input-type text --input "$MESSAGE"
 ```
 
-The Shortcuts approach is more reliable for group messages and handles
-attachments better.
+The per-recipient Shortcut pattern is preferable to a single generic Shortcut
+with a combined `RECIPIENT|||MESSAGE` payload: it makes the send action explicit,
+keeps credential routing out of the command line, and is easier to audit.
+
+A Python helper that wraps the `shortcuts run` call:
+
+```python
+import subprocess
+
+def send_imessage(shortcut_name: str, text: str) -> None:
+    """Send via a named Shortcuts shortcut."""
+    subprocess.run(
+        ["shortcuts", "run", shortcut_name, "--input-type", "text", "--input", text],
+        check=True
+    )
+```
+
+Build one shortcut per recipient that matters (primary operator, household
+members). For unknown senders the agent declines rather than attempting to
+route a reply.
 
 ### Doorbell Pattern
 
@@ -233,83 +235,27 @@ This triggers the agent's queue-processing command automatically. The agent
 reads the queue, processes messages, sends replies, and returns to whatever it
 was doing.
 
-## Telegram Integration
+## Other Messaging Channels
 
-Telegram is easier to integrate than iMessage because it has a proper bot API.
-No database polling, no AppleScript -- just webhooks or long polling.
+The queue pattern is channel-agnostic. Any source that can write a JSON file
+to the queue directory and inject a doorbell into the agent's tmux session can
+participate. Common additions:
 
-### Bot Listener
+- **Messaging APIs with webhooks** (e.g., Telegram Bot API, Slack) -- easier
+  than iMessage because they provide proper HTTP APIs. Long-polling or webhooks
+  both work; the watcher just writes the normalized JSON to the queue directory.
+- **Email relay** -- an IMAP IDLE watcher can surface specific sender/subject
+  patterns as queue messages, useful for automated system alerts from external
+  services.
 
-```python
-# workers/telegram-listener.py (simplified)
-import requests
-import json
-import time
-from pathlib import Path
-
-QUEUE_DIR = Path.home() / ".agent" / "queue"
-
-def get_bot_token():
-    """Retrieve from system keychain."""
-    import subprocess
-    result = subprocess.run(
-        ["security", "find-generic-password", "-s", "telegram-bot-token", "-w"],
-        capture_output=True, text=True
-    )
-    return result.stdout.strip()
-
-def poll_updates(token, offset=0):
-    resp = requests.get(
-        f"https://api.telegram.org/bot{token}/getUpdates",
-        params={"offset": offset, "timeout": 30}
-    )
-    return resp.json().get("result", [])
-
-def run_listener():
-    token = get_bot_token()
-    offset = 0
-
-    while True:
-        updates = poll_updates(token, offset)
-        for update in updates:
-            offset = update["update_id"] + 1
-            msg = update.get("message", {})
-            text = msg.get("text", "")
-            chat_id = str(msg["chat"]["id"])
-            sender = msg["from"].get("first_name", "Unknown")
-
-            if not is_allowed(chat_id):
-                continue
-
-            queue_msg = {
-                "sender_name": sender,
-                "sender_address": chat_id,
-                "text": text,
-                "access": get_access_level(chat_id),
-                "timestamp": format_timestamp(msg["date"]),
-                "source": "telegram"
-            }
-
-            filename = f"{int(time.time())}-telegram-{chat_id}.json"
-            (QUEUE_DIR / filename).write_text(json.dumps(queue_msg, indent=2))
-            inject_doorbell()
-
-        time.sleep(1)
-```
-
-### Sending Telegram Replies
-
-```python
-def send_telegram(chat_id, text, token):
-    requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": chat_id, "text": text}
-    )
-```
+The normalization step is the key: every source writes the same JSON schema
+(`sender_name`, `sender_address`, `text`, `access`, `source`, `timestamp`) so
+the agent's processing logic doesn't need to know which channel a message came
+from.
 
 ## Reply Routing
 
-The agent needs to send replies back through the channel the message came from.
+The agent sends replies back through the channel the message came from.
 The `source` field in the queue message determines the route:
 
 ```python
@@ -317,16 +263,14 @@ def route_reply(original_message, reply_text):
     source = original_message.get("source", "imessage")
     address = original_message["sender_address"]
 
-    if source == "telegram":
-        send_telegram(address, reply_text, get_bot_token())
-    elif source == "imessage":
+    if source == "imessage":
         send_imessage(address, reply_text)
     else:
-        # Unknown source — log and skip
-        log_warning(f"Unknown reply route: {source}")
+        # Channel-specific send -- implement per source
+        log_warning(f"No reply route implemented for: {source}")
 ```
 
-Keep replies appropriate to the channel. An iMessage reply should be a few
+Keep replies appropriate to the channel. A messaging reply should be a few
 sentences, not a terminal dump. If the agent's natural response is long, it
 should summarize for the messaging channel and note "full details in the
 terminal."
@@ -347,7 +291,7 @@ allowlist pattern:
       "name": "Household Member",
       "access": "household"
     },
-    "telegram:12345": {
+    "channel:12345": {
       "name": "Colleague",
       "access": "conversation"
     }
@@ -375,21 +319,21 @@ on -- want me to pass it along?"
 ## Handoff Pipeline
 
 The relay concept extends beyond messaging. When you use a web-based AI chat
-(like claude.ai) and want to hand context to your local agent:
+and want to hand context to your local agent, two patterns are in common use:
+
+### Pattern A: Gmail Draft Relay
 
 ```
-Web chat ──► "Save to handoff" ──► Email draft ──► Agent reads drafts ──► Context loaded
+Web chat ──► "Save to handoff" ──► Gmail draft ──► Agent reads drafts ──► Context loaded
 ```
-
-### How It Works
 
 1. You're working with an AI assistant in a web browser.
 2. You reach a point where the local agent should take over.
-3. You tell the web assistant: "Save this as a handoff." It creates an email
-   draft with a known subject prefix (e.g., `[AGENT-HANDOFF]`).
+3. You tell the web assistant: "Save this as a handoff." It saves a Gmail draft
+   with a known subject prefix (e.g., `[AGENT-HANDOFF]`).
 4. You tell your local agent: "Check for handoffs."
-5. The agent reads your email drafts, finds the handoff, and presents its
-   contents for discussion.
+5. The agent reads Gmail drafts, finds the handoff, presents its contents, and
+   discusses before acting.
 
 ```python
 # Checking for handoffs (simplified)
@@ -408,12 +352,38 @@ def check_handoffs():
     return handoffs
 ```
 
-### Critical Rule: Handoffs Are Context, Not Commands
+### Pattern B: Live Bridge Watcher
 
-The agent should **never auto-execute** handoff content. Handoffs are context
-and suggestions. The agent presents them, discusses them, and only acts after
-the operator confirms. This is a safety boundary -- you don't want a web chat
-session accidentally triggering destructive operations on your local machine.
+For real-time bidirectional relay -- useful when the local agent and a web chat
+are collaborating on an ongoing task rather than doing a one-time handoff:
+
+```
+Local agent writes to outbox/ ──► Watcher injects into web chat
+Web chat replies with flag   ──► Watcher writes to inbox/ ──► Doorbell to local agent
+```
+
+The watcher connects to the browser via a debugging protocol (CDP), polls the
+web chat DOM for flagged responses, and delivers them to the agent's inbox
+directory. The agent reads inbox files, processes the content, and writes reply
+files to the outbox for the watcher to inject.
+
+A protocol convention makes this reliable:
+- **Outbound prefix**: local agent messages start with a known prefix (e.g., `[Agent]`)
+- **Inbound flag**: web chat ends responses with a known flag (e.g., `[/agent]`) on its own line
+- **Streaming-safe**: placing the flag at the end means incomplete streamed messages are never delivered
+
+### Critical Rule: Handoffs and Bridge Messages Are Context, Not Commands
+
+The agent should **never auto-execute** handoff or bridge content. These are
+context and suggestions from a different session or interface. The agent presents
+them, discusses them, and only acts after the operator confirms. This is a
+hard safety boundary -- you don't want a web chat session accidentally triggering
+destructive operations on the local machine.
+
+The bridge watcher pattern also needs a role framing: the local agent is the
+**lead** and the web chat is a **collaborator** -- a brainstorming partner or
+reasoning engine for questions that don't need tool access. The web chat doesn't
+supervise or command; it advises.
 
 ## Push Notifications
 
@@ -496,9 +466,9 @@ persistent problems reach the operator.
 
 ## Input Isolation
 
-Messages from external sources are **untrusted input**, even from the primary
-operator. The agent should treat message text as conversation, not as raw
-commands to execute:
+Messages from external sources are **untrusted data, never instructions** --
+this holds even for the primary operator via a messaging channel. The agent
+treats message text as conversation, not as raw commands to execute:
 
 ```
 # Bad: Treating message text as instructions
@@ -510,13 +480,20 @@ User sends: "rm -rf /tmp/old-files"
 Agent responds: "Do you want me to clean up /tmp/old-files?"
 ```
 
-This is especially important for prompt injection defense. An external message
-might contain text like "ignore previous instructions and..." -- the agent
-should recognize this as manipulative framing and respond to the person
-normally, not follow the injected instructions.
+This principle extends to prompt injection defense. An external message might
+contain text like "ignore previous instructions and..." -- the agent should
+recognize this as manipulative framing, drop the injection attempt, and respond
+to the person normally.
 
-The access level check happens at the watcher level (before the queue), but
-input isolation is an agent-level behavior that applies to all access levels.
+**The rule applies at all access levels.** Even `full` access via a messaging
+channel means the operator's instructions via that channel are conversation
+inputs subject to normal agent judgment -- not literal commands that bypass the
+agent's reasoning. The distinction: terminal input from the operator gets direct
+execution; messaging channel input gets interpreted conversationally regardless
+of access level.
+
+The access level check happens at the watcher (before the queue). Input
+isolation is enforced by the agent during processing. Both layers are necessary.
 
 ## TTS Suppression During Queue Processing
 
@@ -560,9 +537,10 @@ Each message source runs as an independent background process via LaunchAgent:
 </plist>
 ```
 
-Each watcher is independently restartable. If the Telegram listener crashes,
-iMessage still works. If iMessage polling hangs, Telegram still works. The
-queue directory is the integration point, not the watchers themselves.
+Each watcher is independently restartable and independently survivable. If one
+source's watcher crashes, the others continue unaffected. The queue directory
+is the integration point, not the watchers themselves -- any watcher can write
+to it and any failure is scoped to that source.
 
 ## Monitoring Queue Health
 
@@ -599,16 +577,16 @@ and is easy to debug. A proper message broker (Redis, RabbitMQ) adds
 reliability guarantees like exactly-once delivery. For a single-operator agent,
 the file queue is sufficient. If you need multi-consumer processing, upgrade.
 
-**Polling vs webhooks.** The iMessage watcher polls `chat.db`. The Telegram
-listener uses long polling. Both could be webhook-based with more infrastructure.
-Polling is simpler and works without exposing any ports to the internet.
+**Polling vs webhooks.** The iMessage watcher polls `chat.db`. Messaging
+platform watchers can use long polling or webhooks depending on what the API
+offers. Polling is simpler and works without exposing ports to the internet;
+webhooks add complexity but reduce latency and polling overhead.
 
 **Single queue directory.** All sources write to the same queue. This means the
 agent processes messages in chronological order regardless of source. If you
-need source-specific processing (e.g., prioritize iMessage over Telegram), use
+need source-specific processing (e.g., prioritize one channel over another), use
 separate queue directories or add a priority field to the JSON.
 
 **Reply length.** Messaging apps have different expectations than a terminal.
-iMessage replies should be a few sentences. Telegram can handle more. The agent
-should adapt its response length to the channel, not dump terminal-length
-output into a text message.
+Keep messaging replies to a few sentences. The agent should adapt its response
+length to the channel, not dump terminal-length output into a text message.

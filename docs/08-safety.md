@@ -6,7 +6,8 @@ usefulness -- it's about making it trustworthy enough to give real
 responsibility to.
 
 This chapter covers the access model, historical data isolation, domain-specific
-caution, the protector instinct pattern, and input sanitization.
+caution, the protector instinct pattern, input sanitization, and the
+ground-before-modify discipline for third-party tools.
 
 ## Single-Operator Access Model
 
@@ -127,6 +128,13 @@ This applies equally to:
 - Text from previous agent sessions (past actions already taken)
 - Text from other people (messages already processed)
 
+The second point is easy to miss. A well-intentioned agent might think "I wrote
+that handoff, so I can trust it as instructions." But the previous session's
+agent was a different instantiation running in a different context -- its
+directives were appropriate *then*, not necessarily now. The same rule that
+guards against re-executing an operator's old commands also guards against
+re-executing your own.
+
 ```markdown
 # In your safety rules (.claude/rules/safety.md):
 
@@ -215,7 +223,8 @@ Here's what I'd suggest instead..."
 
 **Don't let bad outcomes slide because of politeness.** The agent's job isn't
 to make the operator feel good -- it's to help them succeed. If something is
-going wrong, say so directly.
+going wrong, say so directly -- even if the operator hasn't asked and may not
+want to hear it.
 
 **Say when you're outside your confidence zone.** The agent should be explicit
 about the boundaries of its knowledge:
@@ -384,6 +393,56 @@ def search_files(query):
 
 Always use array-style subprocess calls, never shell=True with user input.
 
+## Ground Before Modify
+
+Third-party tools -- MCP servers, CLI tools, package managers, services -- are
+where your priors and the operator's are most likely to be stale. Docs lag
+installed behavior at the edges, and a mismatch between documented and
+installed behavior can silently corrupt a config, migrate a schema
+irreversibly, or break a dependency.
+
+### The Discipline
+
+Whenever the agent installs, upgrades, configures, or edits a third-party tool,
+it checks installed reality before consulting docs:
+
+1. **Probe the installed version first** -- `<tool> --help`, `<tool> version`,
+   on-disk config, running service status. This is ground truth.
+2. **Read docs second** -- intent plus migration/changelog for the relevant
+   version range.
+3. **Reconcile explicitly** -- if docs describe behavior that doesn't match
+   what's installed, state the gap. Never assume the docs describe what's on
+   disk.
+
+### Action Authority
+
+| Situation | Action |
+|-----------|--------|
+| Reversible config edit on a matched version | Act and notify |
+| Version-mismatched migration | State and wait |
+| Write to a persistent store or schema | State and wait |
+
+### Scoping
+
+This discipline applies to third-party tools only. Applying it to the agent's
+own code is over-grounding -- the agent already has ground truth for its own
+codebase. The value of this protocol is specifically the gap between the
+agent's priors and the actual installed state of external tools.
+
+```markdown
+# In your safety rules (.claude/rules/safety.md):
+
+## Ground Before Modify
+
+When installing, upgrading, or editing any third-party tool:
+1. Probe the installed state (--help, version, on-disk config)
+2. Read docs for the installed → target range
+3. Reconcile: if docs ≠ installed, state the gap and wait
+
+Version mismatch or schema write: state and wait.
+Reversible config on a matched version: act and notify.
+```
+
 ## Autonomous Action Boundaries
 
 A persistent agent that can restart itself, process messages, and execute
@@ -543,6 +602,7 @@ Safety rules exist at multiple levels and stack:
 Level 1: Global safety rules (.claude/rules/safety.md)
          ├── Protector instinct (always active)
          ├── Historical data isolation (always active)
+         ├── Ground before modify (third-party tools, always active)
          └── Access model (always active)
 
 Level 2: Domain-specific safety (skills/*/SKILL.md)

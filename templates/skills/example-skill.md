@@ -1,30 +1,68 @@
-# Skill Name
+---
+name: your-domain
+description: "Brief, precise trigger condition. List specific topics, terms,
+or scenarios that should activate this skill. Write this as a trigger spec,
+not a prose summary — the agent uses it to decide when to load the full file."
+---
 
-Brief description of what this skill covers.
+# Domain Name -- Knowledge & Reference
 
-## When to Load
+One paragraph: what this domain is, the operator's expertise level,
+and how the agent should communicate here (peer-level, protective,
+collaborative, etc.).
 
-- Triggered by `/skill-command` or when the domain is detected
-- Relevant keywords: [list trigger words]
+## Context
 
-## Knowledge
+- **Tools / Equipment:** relevant items, models, versions
+- **Active Projects:** current work in this domain
+- **Key Terminology:** domain-specific terms the operator uses
 
-### Topic 1
+## Communication Calibration
 
-Key facts, procedures, reference material.
+How the agent should communicate in this domain. Examples:
+- Expert peer: be terse, assume vocabulary, don't explain basics.
+- Protective: flag uncertainty explicitly, defer to professionals.
+- Collaborative: push back on methodology, ask clarifying questions.
 
-### Topic 2
+## Key Knowledge
 
-More domain knowledge.
-
-## Rules
-
-- Domain-specific behavior rules
-- What to be careful about
-- When to defer to the operator
+Domain-specific facts, patterns, or procedures the agent should know.
+Keep this focused -- don't reproduce a textbook. Capture the things
+that would take the agent time to rediscover: gotchas, non-obvious
+defaults, known failure modes.
 
 ## References
 
-- External docs or resources
-- File paths to relevant code
-- Links to tools or APIs used
+Pointers to supplemental docs, loaded only when the sub-topic comes up:
+
+- `references/some-doc.md` -- [when to load it]
+- `references/other-doc.md` -- [when to load it]
+
+## Safety
+
+Domain-specific cautions and hard limits:
+
+- Never guess on [safety-critical parameters] -- state uncertainty explicitly
+- Defer to [professionals/domain experts] for [specific decisions]
+- Flag [these situations] immediately rather than proceeding
+
+---
+# Notes for operational skills (.claude/skills/)
+#
+# If this skill lives in .claude/skills/ rather than skills/, the structure
+# above still applies, but shift the emphasis:
+#
+# - Lead with the exact CLI syntax and concrete examples
+# - Capture gotchas discovered through use (ground truth beats docs)
+# - Include hard rules that must never be bypassed (e.g., "never log secrets")
+# - Keep the description trigger-precise -- it drives auto-activation
+#
+# Example frontmatter for an operational skill:
+#
+#   ---
+#   name: keychain-cli
+#   description: "Credential storage and retrieval from the system keychain.
+#   Use whenever a task needs a secret, asks to store/rotate/find a password
+#   or API key, mentions keychain, or when a credential is found in plaintext
+#   on disk and needs to be secured."
+#   ---

@@ -43,6 +43,8 @@ This system has scaling limits that show up within weeks of active use:
 
 For a weekend project, this is fine. For a persistent agent that runs for months, you need something more intentional. The architecture below replaces the OEM system with two purpose-built tiers.
 
+One specific anti-pattern to avoid once you adopt L2: do **not** continue writing individual `user_role.md`-style memory files alongside the graph store. That creates a split-brain between two systems. Commit fully -- L1 (MEMORY.md) as the working scratchpad, L2 (graph memory) as the durable store, nothing else.
+
 ## The Two-Tier Architecture
 
 The evolved pattern uses two tiers, each optimized for a different access pattern:
@@ -76,19 +78,21 @@ Context Injection (startup assembly)
 
 ## L1: MEMORY.md (Working Context)
 
-MEMORY.md lives in your project directory and is auto-loaded by Claude Code in the first ~200 lines of every session. It is not a knowledge base -- it is a whiteboard. Three sections:
+MEMORY.md lives in your project directory and is auto-loaded by Claude Code in the first ~200 lines of every session. It is not a knowledge base -- it is a whiteboard. It has two jobs: (1) track what is actively in flight, and (2) serve as a pointer index to per-project READMEs and other living documents. Three sections:
 
 ### Active Work
 
-What the agent is currently working on. Updated during sessions as tasks progress. Cleared when work is complete.
+What the agent is currently working on. For any project that has its own README, a single line pointing there is enough -- the README is the source of truth for status, phase, and open questions. Inline prose is for projects too small to warrant a README.
 
 ```markdown
 ## Active Work
 
-- Refactoring startup hook — consolidated attunement into main hook, testing warm paths
-- HPC job pilot_F_control at iter 98K/100K — finishing tonight, pull checkpoint next session
+- Startup hook refactor — testing consolidated warm-path logic → project/startup-hook/README.md
 - Camera MCP server — USB enumeration unreliable after reboot, workaround in place
+- Backup worker — pilot running, verifying 3-day retention window
 ```
+
+Keep entries to one line. If an entry is growing into a paragraph, that project needs a README.
 
 ### Open Questions
 
@@ -97,7 +101,7 @@ Things to follow up on across sessions. Not tasks -- questions that need answers
 ```markdown
 ## Open Questions
 
-- TTS model — check if newer Kokoro version has been released
+- TTS model — check if newer version has been released
 - Launchd vs cron for cardiac cycle — revisit after 30 days of launchd reliability data
 ```
 
@@ -114,9 +118,9 @@ Scratchpad for the current session. Anything that might be useful later but has 
 
 ### L1 Discipline
 
-MEMORY.md should stay short -- ideally under 100 lines, never more than 200. If it is growing beyond that, you are storing things that belong in L2 or not storing anything at all. Common symptoms:
+MEMORY.md should stay short -- ideally under 200 lines. If it is growing beyond that, you are storing things that belong in project READMEs or L2. Common symptoms:
 
-- Active Work items that were completed sessions ago but never removed
+- Active Work entries with multi-line status blocks that belong in a README
 - Open Questions that were answered but never pruned
 - Session Notes that survived multiple restarts
 
@@ -132,7 +136,7 @@ L2 is the durable layer. It handles knowledge that is *sometimes* relevant -- op
 - **Importance scoring** -- not all facts are equally worth remembering (1-5 scale)
 - **Natural decay** -- old, unreinforced memories fade; accessed memories get reinforced
 - **Entity extraction and graph edges** -- memories link to related memories, forming a knowledge graph
-- **Intent-aware recall** -- the recall engine detects what kind of query it is (lookup vs. exploration vs. context-building) and adjusts retrieval accordingly
+- **Multiple stores** -- separate named stores let you isolate domains (work, personal, per-project) so queries do not bleed across contexts
 - **Category filtering** -- preferences, decisions, facts, insights, context
 
 ### Architecture
@@ -152,6 +156,8 @@ agent-memory recall "terminal display preferences" --limit 5
 ```
 
 The recall command returns results ranked by relevance, importance, and recency. The agent calls it before responding to messages that depend on past context.
+
+If your graph memory tool supports PPR (Personalized PageRank) augmentation, consider wrapping it in a thin shell script that routes in-conversation recall through PPR while leaving short structured queries (startup recall, category-filtered lookups) on the direct path. PPR improves multi-hop recall for free-form conversational queries; it can *hurt* precision on short targeted queries. Keep the paths separate.
 
 ### Categories and Importance
 
@@ -186,6 +192,8 @@ Skip the recall when:
 - The question has no dependency on past work
 - The answer is in a file that can be read directly
 
+Recall before web search -- if the answer is already in memory, retrieving it there is faster and cheaper.
+
 ```markdown
 # Example rule in .claude/rules/protocols.md
 
@@ -196,7 +204,7 @@ knowledge, or operator preferences: run `agent-memory recall "<query>"`
 first. Craft keyword-rich queries -- don't pass the raw user message.
 
 Skip when: direct follow-up already in context, or no dependency
-on past work.
+on past work. Recall before web search.
 ```
 
 ### Remember Protocol
@@ -205,13 +213,18 @@ After every substantive response, the agent runs a decision tree:
 
 1. **Does the exchange contain a user directive, reasoning conclusion, or durable observed state?** If no to all three, stop. Most turns produce nothing worth storing.
 
-2. **Does a highly overlapping memory already exist?** If yes, decide: update the existing memory, replace it, or skip. Do not create near-duplicates.
+2. **Does a highly overlapping memory already exist?** If yes, decide: update the existing memory (APPEND-CORRECTION), replace it, or skip. Do not create near-duplicates.
 
 3. **Is it worth storing?** The test: would rebuilding this knowledge from scratch cost more than storing and recalling it? If the answer is derivable from a config file or git log, do not store it.
 
-4. **Delegate the write.** Run the actual `agent-memory remember` call in a sub-agent, not the main conversation thread. Memory writes are I/O and token cost that should not pollute the primary context window.
+4. **Delegate the write.** Do not run `agent-memory remember` in the main conversation thread. Batch all writes from a single turn into one sub-agent call. Pass the content and metadata (category, importance, entities) -- not raw CLI commands. The sub handles mechanical execution; the main thread handles judgment.
 
-Importance guidelines for step 3:
+Write classes:
+- **APPEND** -- new fact, no prior overlap. Sub writes directly.
+- **APPEND-CORRECTION** -- supersedes stale state. Compose the corrected fact in the main turn; sub writes the new entry and links it to the stale one. The built-in diff handles near-match auto-replacement; the explicit link adds graph traceability.
+- **DESTRUCTIVE FORGET** -- hard expunge of wrong or sensitive data. Gate this: get operator acknowledgment before the sub runs the delete.
+
+Importance guidelines:
 
 - Operator preferences, decisions, corrections: importance 4-5
 - System facts, configuration discoveries: importance 3-4
@@ -226,6 +239,7 @@ Promotion is the bridge between L1 and L2. It runs at session end (during your r
 
 - Still active? Keep in L1.
 - Completed? Remove from L1. If the completion involved a decision or insight worth preserving, promote to L2.
+- Project state changes? Update the project's README -- not L1, not L2.
 
 ### Step 2: Scan Open Questions
 
@@ -238,6 +252,8 @@ Promotion is the bridge between L1 and L2. It runs at session end (during your r
 - Contains durable knowledge (insight, preference, decision)? Promote to L2.
 - Everything else? Discard.
 
+The full flow at restart is: durable insights → L2, project state changes → per-project READMEs, global state changes → MEMORY.md pointer updates. Handoffs are pointers ("see project README"), not retransmissions of project state.
+
 ### Why This Matters
 
 Without promotion, L1 becomes a graveyard of stale notes and L2 stays empty. Without pruning, L1 grows until it is as noisy as the monolithic memory file you were trying to escape. The protocol ensures knowledge flows from scratchpad to durable storage at the natural session boundary.
@@ -248,10 +264,53 @@ Without promotion, L1 becomes a graveyard of stale notes and L2 stays empty. Wit
 ## Promotion Protocol
 
 At session end (/restart), before clearing MEMORY.md:
-1. Active Work — still active? Keep. Done? Remove (promote insight if any).
+1. Active Work — still active? Keep. Done? Remove (promote insight if any). State changes? → project README.
 2. Open Questions — answered? Remove. Open? Keep. 3+ sessions? Promote to L2.
 3. Session Notes — durable? Promote to L2. Rest → discard.
+Handoffs = pointers to READMEs + next action. Not a retransmission of project state.
 ```
+
+## Project READMEs: Per-Project Source of Truth
+
+As your agent accumulates active projects, L1 (MEMORY.md) becomes a tempting place to track status per project. Resist this. A project that has more than a few sentences of state deserves its own README.
+
+### What Goes in a Project README
+
+Each project README is the definitive catch-up document for that project. A useful structure:
+
+- **Situation** -- one paragraph of current state, written for a reader who was away for two weeks
+- **Quick Status** -- a table, one row per live workstream: what it is, current state, what's next
+- **Phase map** -- where the project has been and where it is going
+- **Key files** -- the three to five files a new session needs to know about
+- **Open questions** -- project-specific blockers and unresolved decisions
+
+```markdown
+## Situation
+The async worker was refactored last week to use launchd instead of cron.
+Three of five workers are running cleanly; two are failing silently.
+
+## Quick Status
+| Workstream | State | Next |
+|------------|-------|------|
+| launchd migration | 3/5 live | debug workers 4 and 5 |
+| monitoring hooks | in progress | finish stop hook |
+
+## Key Files
+- `workers/async-worker.py` — main worker
+- `launchd/com.agent.async-worker.plist` — launchd config
+- `.claude/rules/workers.md` — worker conventions
+```
+
+### How L1 References It
+
+MEMORY.md carries one line per active project, pointing to its README:
+
+```markdown
+## Active Work
+- Async worker launchd migration — workers 4/5 failing silently → projects/async-worker/README.md
+```
+
+Do not copy project state into MEMORY.md. Read the README on demand, when you branch into that project's work. The handoff (written at restart) lists which READMEs the next session should consult and what the immediate next action is -- it does not retransmit project state.
 
 ## Infrastructure: File-Based State
 
@@ -389,53 +448,26 @@ This distinction matters for token economy. A cold start might inject 500 tokens
 | Handoff | `~/.agent/handoff.md` | When present |
 | Today's Pulse | `~/.agent/today-pulse.md` | When today has entries |
 | Last Session Tail | Previous session transcript | When available |
-| Attunement | Graph memory queries | Always (see below) |
+| Tasks | Task index | When tasks exist |
+| Profiles | Per-person summaries | When populated |
 | Background | Graph memory recall | Cold start only |
 | Brief Flag | Date comparison | Cold morning start only |
 
-### The Attunement Pattern
+### The Recall-on-Cold-Start Pattern
 
-Attunement is a structured query of graph memory that builds an awareness snapshot of the operator. It runs on every startup and answers five questions:
-
-1. **Active focus** -- what is the operator working on right now?
-2. **Communication style** -- how do they prefer to interact?
-3. **Current state** -- recent mood, energy, workload signals
-4. **Key people** -- who is relevant in the operator's world right now?
-5. **Recent threads** -- what happened in recent sessions, what is still open?
+A simpler alternative to running multiple structured queries every startup is single-query background recall. On a cold start (no handoff file, no pulse entries for today), run one free-form recall query for recent activity and inject the top few results as a "Background" section:
 
 ```python
-QUERIES = [
-    {
-        "name": "Active Focus",
-        "query": "current projects, priorities, blockers",
-        "limit": 5,
-    },
-    {
-        "name": "Communication & Style",
-        "query": "communication preferences, work style, patterns",
-        "limit": 3,
-    },
-    {
-        "name": "Current State",
-        "query": "recent mood, stress, energy, workload, schedule",
-        "limit": 3,
-    },
-    {
-        "name": "Key People",
-        "query": "family, colleagues, key relationships",
-        "limit": 3,
-    },
-    {
-        "name": "Recent Threads",
-        "query": "recent sessions, decisions made, open threads",
-        "limit": 5,
-    },
-]
+# Cold start only -- warm starts already have a handoff
+if is_cold_start:
+    recall = run_graph_recall("session context recent activity", limit=3)
+    if recall:
+        parts.append(f"## Background\n{recall}")
 ```
 
-Each query runs against graph memory and returns a few bullet points. The assembled snapshot goes into the startup context. The agent uses it to calibrate its behavior -- not explicitly ("according to my attunement data...") but naturally. If the snapshot shows the operator is under deadline pressure, the agent keeps things brief. If it shows they are in a research mood, the agent is more exploratory.
+This is cheaper than the multi-query attunement pattern described in some earlier designs. The tradeoff: less structured (you get whatever the graph considers most relevant rather than answers to specific questions), but it is faster, lower token cost, and does not risk stale structured queries. On warm starts, the handoff is more specific and background recall is skipped entirely.
 
-Attunement stays fresh automatically. The agent's normal memory writes and periodic reflections feed it. No special maintenance required.
+If you find the single-query approach misses important context (preferences, communication style), add targeted queries -- but measure the token cost first. Structured multi-query attunement can consume 300-500 tokens on startup even when none of it is relevant to the current conversation.
 
 ### Injection Size Budget
 
@@ -456,9 +488,10 @@ Rules of thumb:
 | Current context window usage | File-based infra | Updated every turn by statusline hook |
 | Handoff between sessions | File-based infra | Written once, read once, deleted |
 | Today's session summaries | File-based infra | Append-only, reset daily |
-| Current tasks and in-flight work | L1 (MEMORY.md) | Always visible, updated live, pruned on restart |
+| Current tasks and in-flight work | L1 (MEMORY.md) | Pointer index; one line per active project |
 | Cross-session open questions | L1 (MEMORY.md) | Visible until answered or promoted to L2 |
 | Session scratchpad | L1 (MEMORY.md) | Temporary, wiped after promotion scan |
+| Per-project status, phases, open questions | Per-project README | Source of truth for project state; read on demand |
 | Operator preferences | L2 (Graph memory) | Semantic recall, accumulated over time |
 | Past decisions + rationale | L2 (Graph memory) | Queried when relevant, not always loaded |
 | System configuration facts | L2 (Graph memory) | Queried on demand, not burned into context |
@@ -533,7 +566,7 @@ Build this when simpler approaches hit their limits, not before.
 
 **Storing secrets.** Never store passwords, API keys, or tokens in any memory layer. This is a hard rule with no exceptions.
 
-**Writing memory from the main thread.** Memory writes (the `agent-memory remember` call) consume tokens and I/O in whatever context they run. If you write memories from the main conversation thread, you are polluting the operator's context window with bookkeeping. Delegate memory writes to a sub-agent. The main thread decides *what* to store; a sub handles the actual write.
+**Writing memory from the main thread.** Memory writes (the `agent-memory remember` call) consume tokens and I/O in whatever context they run. If you write memories from the main conversation thread, you are polluting the operator's context window with bookkeeping. Batch all writes from a given turn into a single sub-agent call. The main thread decides *what* to store and composes the content; the sub handles execution. Never write in the main thread, and never spin up one sub per write -- batch them.
 
 **Storing derivable information.** If it is in git history, a config file, or the codebase itself, do not duplicate it in memory. Code patterns, architecture decisions visible in the code, and file structures are all derivable. Memory should store things that are *not* written down elsewhere -- preferences stated verbally, one-off debugging discoveries, decisions made in conversation.
 

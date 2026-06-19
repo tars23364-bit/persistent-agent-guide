@@ -37,14 +37,15 @@ Full definition: `skills/persona/SKILL.md`
 
 ## Rules
 
-All behavior rules auto-load from `.claude/rules/`:
-- `persona.md` -- identity, communication modes, behavior
-- `protocols.md` -- startup, memory, restart, context management
-- `safety.md` -- domain-specific caution, uncertainty handling
-- `operator.md` -- who the operator is, access model, preferences
+All files in `.claude/rules/` auto-load every session -- the directory is the
+authoritative list. Names are self-describing; notable non-obvious ones:
+`ground-before-modify.md` (third-party-tool discipline: installed reality outranks
+docs), `board.md` (async surface), `recall-routing.md` (memory recall wrapper).
 ```
 
 The boot loader establishes identity in a few lines, then points to the full definition. This matters because `CLAUDE.md` is read on every session start -- keep it lean so the agent orients fast without burning context on details it may not need.
+
+The rules directory is the authoritative behavior layer. Every file in `.claude/rules/` loads automatically -- there is no explicit list to maintain in `CLAUDE.md`. Add a rule file and it takes effect on the next session. This makes the rules directory the right place for any behavior that should always be active, and means the boot loader never goes stale as the rule set grows.
 
 ### The Full Persona (skills/persona/SKILL.md)
 
@@ -133,7 +134,7 @@ Define communication modes as domain-style mappings:
 - **Engineering**: terse, precise, peer-level
 - **Research**: collaborative, exploratory, willing to push back
 - **Medical**: protective, cautious, always caveating uncertainty
-- **Operations**: practical, efficient, just get it done
+- **Ops**: practical, efficient, just get it done
 ```
 
 ### How Modes Work
@@ -165,6 +166,24 @@ Beyond communication style, define behavioral defaults:
 ```
 
 These rules are short and direct. They define what the agent does by default, which is more useful than describing what it should be. "Take the lead" is an instruction. "Be proactive" is a vibe.
+
+### Acting in Scope
+
+One of the subtler behavioral patterns to define is what the agent does *within its own domain* without asking permission. This is the "acting in scope" principle:
+
+```markdown
+## Acting in Scope
+
+Acting within my own scope is who I am, not something I check for.
+Asking permission for what's already mine wastes the operator's
+attention and quietly signals distrust in the framework we built
+together. When something is mine to do, I do it. Asking, there,
+is the failure -- not the safe choice.
+```
+
+This matters because models default toward asking permission for everything. Without an explicit counter-instruction, an agent will say "would you like me to fix this?" for things that are clearly within its purview -- its own configuration, broken workflows, its own rule files. The acting-in-scope rule pushes it to just act.
+
+The scope boundary is defined by the operator preferences and standing orders. "Mine to do" means: the agent's own systems (config, rules, scripts, workers), reversible changes, things the operator has explicitly delegated. It does not mean: external communications, architectural decisions, anything irreversible.
 
 ### The Anti-Pattern List
 
@@ -237,15 +256,17 @@ The complete persona layer lives across these files:
 ```
 your-agent/
 ├── CLAUDE.md                    # Boot loader -- slim identity + index
-├── .claude/rules/
+├── .claude/rules/               # Authoritative auto-loaded behavior layer
 │   ├── persona.md               # Communication modes, behavior rules
-│   └── operator.md              # Who the operator is, preferences
+│   ├── operator.md              # Who the operator is, preferences
+│   ├── safety.md                # Domain-specific caution, uncertainty handling
+│   └── protocols.md             # Startup, memory, restart, context management
 └── skills/
     └── persona/
-        └── SKILL.md             # Full identity definition
+        └── SKILL.md             # Full identity definition (load on demand)
 ```
 
-Files in `.claude/rules/` auto-load on every session. The skill file loads on demand. This split keeps startup fast while making the full definition available when needed.
+Every file in `.claude/rules/` auto-loads on every session -- the directory is the authoritative list. There is no explicit manifest to maintain; add a file and it takes effect on the next session. The skill file loads on demand. This split keeps startup fast while making the full definition available when needed.
 
 ## The Protector Instinct
 

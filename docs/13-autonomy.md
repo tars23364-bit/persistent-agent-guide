@@ -82,9 +82,14 @@ While the order is active, the agent acts within that scope without asking. When
 it's inactive, the agent falls back to default-cautious mode — it can discuss
 and plan, but not execute.
 
-### The Grant Channel: A State File the Agent Cannot Write
+### The Grant Channel: A State File with Two Writers
 
-The grant lives in a JSON state file:
+The grant lives in a JSON state file. In a mature setup, this file has exactly
+two writers: an **operator-controlled GUI** (a dashboard toggle, a guarded CLI)
+and the **agent itself — but only on an explicit operator green-light**, typically
+to register a newly-proposed project that hasn't been added to the GUI yet. The
+agent cannot edit its own active tier or flip its own orders on; it can only
+write a new entry after being verbally cleared.
 
 ```json
 {
@@ -92,49 +97,56 @@ The grant lives in a JSON state file:
     {
       "project": "data-pipeline",
       "authority": "standard",
-      "granted": "2026-05-20",
-      "last_reviewed": "2026-05-20"
+      "activated_at": "2026-05-20T14:00:00Z",
+      "deactivated_at": null
     },
     {
       "project": "site-rebuild",
       "authority": "elevated",
-      "granted": "2026-05-22",
-      "last_reviewed": "2026-05-22"
+      "activated_at": "2026-05-22T09:00:00Z",
+      "deactivated_at": null
     }
   ]
 }
 ```
 
-This file is written **only by an operator-controlled surface** — a small GUI, a
-guarded CLI, anything the human drives. The agent reads it; the agent never
-writes it. This is not a soft convention you hope the model respects. Enforce it:
-
-- Put the rule in the agent's always-loaded instructions ("you never write the
-  standing-orders state file; only the operator's UI does").
-- If you want a hard guarantee, make the file operator-owned and not
-  agent-writable at the OS level, or have a `PreToolUse` hook reject any write
-  whose path matches the state file (see [hooks in Chapter 8](08-safety.md)).
+The GUI is the primary writer for existing projects (toggle → writes the file
+immediately). The agent is an occasional secondary writer for new proposals,
+after the green-light. Either way: the agent never escalates its own tier, never
+re-enables a deactivated order, and validates the JSON after every write. If the
+operator deactivates a project in the GUI, that is authoritative — the agent does
+not re-enable it without a new explicit green-light.
 
 Why so strict? Because if the agent can edit its own authority grant, the grant
 means nothing — a single bad inference ("I think the operator would want me to
 have elevated authority here") collapses the entire safety model. Authority
 direction is one-way by construction, not by good behavior.
 
+This is not a soft convention you hope the model respects. Enforce it:
+
+- Put the rule in the agent's always-loaded instructions ("you never write the
+  standing-orders state file except on an explicit operator green-light; you
+  never escalate your own tier").
+- If you want a hard guarantee, have a `PreToolUse` hook reject writes that
+  change an existing entry's `authority` field or flip `deactivated_at` to null
+  without a matching green-light log entry (see [hooks in Chapter 8](08-safety.md)).
+
 ### How the Grant Reaches the Agent
 
 A `UserPromptSubmit` hook reads the state file every turn and, if anything is
-active, injects a single line into the context:
+active, injects a single compact line into the context:
 
 ```
-[STANDING ORDERS ACTIVE: data-pipeline (standard), site-rebuild (elevated)]
+[SO: data-pipeline/S, site-rebuild/E]
 ```
 
-No line means no active orders means default-cautious mode. The agent checks for
-this line the way it checks for any other startup context. The injection is
-cheap — one line — and it's just-in-time: the agent does **not** preload every
-project's detailed standing-order file at session start. It reads the
-project-specific order (`~/.agent/standing-orders/<project>.md`) only when it's
-about to act on that project.
+The tier letters are short by design: **E** = elevated, **S** = standard,
+**R** = restricted. No line means no active orders means default-cautious mode.
+The agent checks for this line the way it checks for any other startup context.
+The injection is cheap — one line — and it's just-in-time: the agent does
+**not** preload every project's detailed standing-order file at session start.
+It reads the project-specific order (`~/.agent/standing-orders/<project>.md`)
+only when it's about to act on that project.
 
 A minimal version of the hook:
 
@@ -285,15 +297,50 @@ without incident (or is clearly bounded and low-risk and the operator signs off
 explicitly), the pattern is stable, and the operator approves in the moment.
 Append a row; keep the original gate table intact so the history stays visible.
 
+### The Propose → Green-Light → Activate Flow
+
+When the agent believes a new project deserves a standing order, or an existing
+one should be re-tiered, the flow is:
+
+1. **Propose** — write the per-project order file with a scope description,
+   proposed authority tier, and the approval gates. State the proposal and wait.
+2. **Green-light** — the operator either toggles in the GUI (for projects already
+   tracked there) or verbally approves (for new projects). Both are valid.
+3. **Activate** — on green-light, write the JSON entry. Validate the JSON after
+   write. Use consistent field ordering.
+4. **Re-tier or deactivate** — same flow. Never escalate tier without an
+   explicit green-light. Standing orders narrow over time unless the operator
+   widens them; they don't auto-broaden.
+
 ### One-Way Authority, Restated
 
 It bears repeating because it's the whole game: **only the operator activates,
 deactivates, or re-tiers a standing order.** If the agent thinks an order should
 change — looser, tighter, expanded scope — it *says so and waits*. It does not
-edit the state file and does not recommend a command that would. The moment the
-agent can move its own gates, the gates are decorative.
+edit the state file in ways that widen its own authority. The moment the agent
+can move its own gates, the gates are decorative.
 
 ## Pattern 2: The Async-Commitment Protocol
+
+### Action Posture (the tier-adjacent rule)
+
+Before getting to time-shifted commitments, there's a simpler question that
+governs everything the agent does under a standing order: **can this be undone?**
+
+- If yes, act — a reversible mistake is cheap. Tell the operator after.
+- If no, state the decision and wait. Reversibility is the line, not size or
+  importance.
+
+Two carve-outs keep this from becoming too permissive: external communications
+to parties outside a small trusted circle stay State-and-Wait even when
+literally reversible (relational damage is not rollback-able), and tiny
+irreversible writes — a log line, an insight stored to memory, a state-file
+touch — are below the gate. Act.
+
+This heuristic sharpens day-to-day judgment; it does not widen the operator-
+granted authority defined by the standing-order tier. Both apply simultaneously.
+
+### The Commitment Bug
 
 Here's a bug that looks like a feature. The agent says, helpfully:
 
@@ -441,8 +488,11 @@ chance," not "drop everything." That's what the **Board** is for: an async,
 non-interrupting surface the operator reads on their own schedule.
 
 Think of it as the agent's bulletin board. It renders wherever you glance — a
-dashboard tile, a status pane, a `--list` command — and accumulates items the
-agent has decided, is wondering about, or wants to flag.
+dashboard home tile, a focus board view, or a `--list` command — and accumulates
+items the agent has decided, is wondering about, or wants to flag. In a setup
+with a companion GUI, `question` and `blocked` items are clickable: tapping one
+opens a compose surface pre-filled with a reply prefix, so acting on a blocker
+takes one tap.
 
 ### Item Types
 
@@ -554,7 +604,10 @@ something truly can't wait, it's not a Board item; it's a push (see
 - **Anything time-sensitive.** Use a push or a text. The Board is explicitly the
   *non-urgent* channel; putting urgent items there buries them.
 - **Anything a peer agent already posted.** In a multi-agent setup
-  ([Chapter 12](12-multi-agent.md)), don't double-post. One item, one source.
+  ([Chapter 12](12-multi-agent.md)), don't double-post. In a setup where a
+  companion agent also writes to the Board, add a `--source` flag so items are
+  attributed, and check whether the other agent already covered the same event
+  before posting.
 
 ### Cadence
 
@@ -570,11 +623,14 @@ request.
 
 ## Common Mistakes & Trade-offs
 
-**The agent edits its own authority.** The single most important boundary in
-this chapter. If the model can write the standing-orders state file, the entire
-tier system is theater. Make the file operator-writable only — by instruction,
-and ideally by a `PreToolUse` hook or filesystem ownership that rejects
-agent writes. Authority is one-way: operator → agent, never back.
+**The agent escalates its own authority.** The single most important boundary in
+this chapter. The two-writer model (GUI + agent-on-green-light) is not a loophole
+— the agent writing a new entry after an explicit verbal green-light is fine; the
+agent silently widening an existing entry's tier is not. If the model can
+unilaterally upgrade its own authority, the tier system is theater. Enforce by
+instruction and, for the paranoid, a `PreToolUse` hook that rejects writes
+changing an `authority` field without a matching logged approval.
+Authority is one-way: operator → agent, never self-granted.
 
 **Scope creep beyond the grant.** A standing order for "data-pipeline" is *not*
 authority to refactor the deploy script because you happened to notice it's

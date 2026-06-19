@@ -15,6 +15,18 @@ rules, and communication calibration for a particular area of expertise. Skills
 are not code -- they're structured instructions that shape how the agent
 operates in a given domain.
 
+There are two distinct flavors, and understanding the distinction is important
+for keeping your context lean:
+
+- **Domain skills** (`skills/`) -- deep expertise files loaded on demand when
+  the conversation enters a particular domain. They can be hundreds of lines
+  long and never touch context unless relevant.
+- **Operational skills** (`.claude/skills/`) -- action-oriented skill files
+  that define how to accomplish specific tasks: CLI conventions, tool usage
+  protocols, external service patterns. These are often triggered by
+  description-matching, and many can also be invoked explicitly as slash
+  commands.
+
 Example structure of a skill file:
 
 ```markdown
@@ -73,8 +85,9 @@ When automation topics reference these, load from references/:
 
 Every skill file has:
 
-1. **YAML frontmatter** -- name, description, and trigger conditions. The
-   description tells the agent when this skill is relevant.
+1. **YAML frontmatter** -- `name` and `description`. The description is
+   the most consequential field: it determines when the skill auto-activates.
+   Write it as a precise trigger condition, not a prose summary.
 
 2. **Domain knowledge** -- what the agent needs to know about this area.
    Equipment, terminology, active projects, reference material.
@@ -164,17 +177,22 @@ Claude Code has a built-in mechanism for auto-loading: files in `.claude/rules/`
 are automatically included in every session's context. This is where you put
 rules that apply universally -- persona, protocols, safety, operator info.
 
-Skills are different. They live in `skills/` and are **not** auto-loaded.
+Domain skills are different. They live in `skills/` and are **not** auto-loaded.
 The agent knows they exist (from the boot loader index) and loads them on
 demand when the conversation enters that domain.
 
+Operational skills in `.claude/skills/` sit in the middle: Claude Code surfaces
+them as available skills and includes their frontmatter descriptions. The full
+skill body is loaded when the description matches or the operator invokes it.
+
 ```
-Always loaded (rules):          Loaded on demand (skills):
-├── .claude/rules/persona.md    ├── skills/machining/SKILL.md
-├── .claude/rules/protocols.md  ├── skills/research/SKILL.md
-├── .claude/rules/safety.md     ├── skills/medical/SKILL.md
-├── .claude/rules/operator.md   └── skills/ops/SKILL.md
-└── .claude/rules/voice.md
+Always loaded (rules):            Loaded on demand:
+├── .claude/rules/persona.md      ├── skills/machining/SKILL.md    (domain)
+├── .claude/rules/protocols.md    ├── skills/medical/SKILL.md      (domain)
+├── .claude/rules/safety.md       ├── skills/ops/SKILL.md          (domain)
+└── .claude/rules/operator.md     ├── .claude/skills/vault/        (operational)
+                                  ├── .claude/skills/google-cli/   (operational)
+                                  └── .claude/skills/reminders-cli/ (operational)
 ```
 
 The distinction matters for context management. Rules consume context on every
@@ -182,8 +200,8 @@ session. Skills only consume context when relevant.
 
 ### Trigger Conditions
 
-The YAML frontmatter description doubles as a trigger guide. The agent reads
-these descriptions at startup and knows when to load the full skill:
+The YAML frontmatter description doubles as a trigger specification. The agent
+reads these descriptions and knows when to load the full skill body:
 
 ```yaml
 ---
@@ -194,10 +212,23 @@ medications, lab results, medical procedures, or health concerns."
 ---
 ```
 
+For operational skills in `.claude/skills/`, the description is especially
+important because it controls *automatic* invocation. Write it as an explicit
+trigger list rather than a general summary:
+
+```yaml
+---
+name: vault
+description: "Credential storage and retrieval from the system keychain.
+Use whenever a task needs a secret, asks to store/rotate/find a password
+or API key, mentions keychain, or when a credential is found in plaintext
+on disk and needs to be secured."
+---
+```
+
 The agent doesn't need explicit trigger logic -- it reads the description and
 uses judgment. If the conversation turns to medication interactions, it loads
-the medical skill. If the operator asks about G-code, it loads the machining
-skill.
+the medical skill. If a task requires reading an API key, it loads vault.
 
 ## Directory Structure
 
@@ -205,24 +236,52 @@ Skills live in their own directories, each with a `SKILL.md` file and optional
 supporting files:
 
 ```
-skills/
-├── persona/
-│   └── SKILL.md           # Core identity and communication style
-├── machining/
-│   ├── SKILL.md           # Main skill file
-│   └── reference/         # Supplemental docs (loaded on demand)
-│       ├── machine-specs.md
-│       └── post-notes.md
-├── research/
-│   └── SKILL.md
-├── medical/
-│   └── SKILL.md
-└── ops/
-    └── SKILL.md
+your-agent/
+├── skills/                        # Domain knowledge (loaded by topic)
+│   ├── persona/
+│   │   └── SKILL.md               # Core identity and communication style
+│   ├── machining/
+│   │   ├── SKILL.md               # Main skill file
+│   │   └── reference/             # Supplemental docs (loaded on demand)
+│   │       ├── machine-specs.md
+│   │       └── post-notes.md
+│   ├── research/
+│   │   └── SKILL.md
+│   ├── medical/
+│   │   └── SKILL.md
+│   └── ops/
+│       └── SKILL.md
+│
+└── .claude/skills/                # Operational skills (triggered by description)
+    ├── vault/
+    │   └── SKILL.md               # Credential access patterns
+    ├── reminders-cli/
+    │   └── SKILL.md               # External reminder system CLI
+    ├── google-cli/
+    │   └── SKILL.md               # Calendar and email CLI conventions
+    └── market-outlook/
+        └── SKILL.md               # Investment research workflow
 ```
 
 Each skill is self-contained. The `SKILL.md` file is the entry point; anything
 in `reference/` is loaded only when specifically needed.
+
+### Operational Skill Patterns
+
+Operational skills in `.claude/skills/` tend to share a common structure:
+they're less about domain expertise and more about *how to operate* a
+particular tool or service correctly. Key things they capture:
+
+- Exact CLI syntax with working examples
+- Gotchas that aren't obvious from docs (discovered through use)
+- Hard rules that must never be bypassed
+- Output format conventions
+
+A credential-management operational skill, for example, would capture the
+exact `security` command syntax for reading and writing keychain entries,
+the principle that secrets must never appear in chat or synced messages,
+and the rotation workflow the operator expects. It's procedural, not
+encyclopedic.
 
 ## Slash Commands
 
@@ -231,12 +290,14 @@ A slash command is a user-triggered action defined in a markdown file:
 
 ```
 commands/
-├── status.md       # /status -- system health check
-├── restart.md      # /restart -- clean restart with handoff
-├── brief.md        # /brief -- morning briefing
-├── memory.md       # /memory -- memory management
-├── voice.md        # /voice -- voice toggle control
-└── process-queue.md  # /process-queue -- handle message queue
+├── status.md    # /status  -- system health check
+├── restart.md   # /restart -- clean restart with handoff
+├── brief.md     # /brief   -- morning briefing
+├── memory.md    # /memory  -- memory management
+├── reflect.md   # /reflect -- reflection cycle
+├── switch.md    # /switch  -- model swap with context handoff
+├── imsg.md      # /imsg    -- process message queue
+└── log.md       # /log     -- activity review
 ```
 
 ### Command File Structure
@@ -296,17 +357,19 @@ instructions.
 
 ### Commands vs Skills
 
-| | Skills | Commands |
-|---|--------|----------|
-| **Purpose** | Domain knowledge | Discrete actions |
-| **Triggered by** | Topic detection (implicit) | User invocation (explicit) |
-| **Loaded when** | Conversation enters domain | User types `/command` |
-| **Persistent** | Stays active for the session | Executes once, returns to normal |
-| **Examples** | Machining expertise, medical reference | System status, restart, voice toggle |
+| | Domain skills | Operational skills | Commands |
+|---|-----------|-----------|----------|
+| **Location** | `skills/` | `.claude/skills/` | `commands/` |
+| **Purpose** | Domain expertise | Tool/service procedures | Discrete actions |
+| **Triggered by** | Topic detection | Description match or explicit | User types `/command` |
+| **Loaded when** | Conversation enters domain | Matching trigger fires | `/command` invoked |
+| **Persistent** | Stays active for the session | Stays active for the session | Executes once |
+| **Examples** | Machining, medical reference | Credential access, CLI patterns | Status check, restart, voice toggle |
 
-A command might *use* a skill. For example, a `/brief` command might load
-calendar data and present it using the communication style defined in the
-persona skill. But they're separate mechanisms.
+A command might *use* a skill. A `/brief` command might load calendar data and
+present it using the communication style defined in the persona skill. An `/imsg`
+command might invoke the medical-research operational skill if the incoming
+message contains a medical query. They're separate mechanisms that compose.
 
 ## The Persona Skill
 
@@ -482,12 +545,13 @@ Automate the reference docs. Earn the skill files.
 
 ## Skills, Rules, and Memory: When to Use What
 
-Three systems store agent knowledge. They serve different purposes:
+Four systems store agent knowledge. They serve different purposes:
 
 | System | Durability | Scope | Content |
 |--------|-----------|-------|---------|
 | **Rules** (`.claude/rules/`) | Permanent | Every session | Universal behavior, identity, protocols |
-| **Skills** (`skills/`) | Permanent | On-demand | Domain expertise, communication calibration |
+| **Domain skills** (`skills/`) | Permanent | On-demand by topic | Domain expertise, communication calibration |
+| **Operational skills** (`.claude/skills/`) | Permanent | On-demand by trigger | Tool/service procedures, CLI patterns |
 | **Memory** (graph DB) | Persistent, decaying | Recalled by query | Decisions, preferences, facts, context |
 
 ### Decision Tree
@@ -503,8 +567,12 @@ Three systems store agent knowledge. They serve different purposes:
 
 **"Does this affect how the agent communicates?"**
 - Yes, universally -> Rules (persona.md)
-- Yes, in a specific domain -> Skill (communication calibration section)
+- Yes, in a specific domain -> Domain skill (communication calibration section)
 - No, it's just information -> Memory
+
+**"Is this about how to operate a tool correctly?"**
+- Yes, and it applies across multiple domains -> Operational skill (`.claude/skills/`)
+- Yes, but it's specific to one domain -> Domain skill reference section
 
 ### Example: Operator Prefers Imperial Units
 
