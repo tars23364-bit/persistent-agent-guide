@@ -33,25 +33,25 @@ Compaction is not a graceful degradation. It is a hard reset of conversational d
 
 Even before compaction, context quality degrades with length. Research shows this is non-linear -- the model's ability to retrieve and use information from earlier in the context drops faster as the window fills.
 
-At 20% usage, the model can reliably reference anything in the conversation. At 50%, it starts losing precision on earlier details. At 70%+, earlier context becomes unreliable.
-
-This means the effective context window is smaller than the nominal one. Plan accordingly.
+The degradation is non-linear -- earlier context becomes increasingly unreliable as the window fills, well before compaction fires. The effective context window is smaller than the nominal one. Plan accordingly.
 
 ## The Threshold System
 
-Rather than letting compaction happen and dealing with the aftermath, use a threshold-based warning system that gives the agent progressively stronger signals to wrap up.
+Rather than letting compaction happen and dealing with the aftermath, use a threshold-based warning system that gives the agent progressively stronger signals to wrap up. All thresholds are **percentage-based**, not absolute token counts -- the window size is model-dependent and changes when you switch models.
 
 ### Architecture
 
 Three components work together:
 
-1. **Statusline bridge** -- a statusline hook that runs on every turn, reads context window metrics from Claude Code, and writes them to a bridge file
+1. **Statusline bridge** -- a hook that runs on every turn, reads context window metrics from Claude Code, and writes them to a bridge file
 2. **Bridge file** -- a JSON file at `~/.agent/state/context.json` that any process can read
-3. **Threshold hook** -- a `UserPromptSubmit` hook that reads the bridge file and injects warnings into the agent's prompt
+3. **Threshold hook** -- a `UserPromptSubmit` hook that reads the bridge file and injects warnings into the agent's prompt automatically, every turn
 
 ```
 Claude Code statusline → statusline-bridge.sh → context.json → context-threshold.sh → agent prompt
 ```
+
+The hook is the ground truth for threshold values. If you change the hook, update the corresponding prose in your rules file to match -- they can drift otherwise.
 
 ### The Bridge File
 
@@ -138,25 +138,28 @@ Define what the agent should do at each level. Put this in `.claude/rules/protoc
 
 **Below 30% -- Green zone.** No warnings. Work normally.
 
-**30-44% -- Awareness zone.** You'll see `[ctx: NN%]` on prompts.
-Be mindful of large file reads and verbose tool output. Start
-preferring subagents for self-contained tasks.
+**30-44% -- Awareness zone** (`[ctx: NN%]`). Be mindful of large file
+reads and verbose tool output. Start preferring subagents for
+self-contained tasks. Prefer `grep` and targeted reads over full file
+reads.
 
-**45-54% -- Wrap-up zone.** Warning escalates. Wind down the current
-task. Delegate remaining work to subagents. Prepare your handoff.
+**45-54% -- Wrap-up zone** (`[CONTEXT HIGH: ...]`). Warning escalates.
+Start winding down the current task. Delegate remaining work to
+subagents. Update task.lock with the next concrete step -- this is
+what the next session resumes from.
 
-**55%+ -- Critical zone.** Hard warning. Do not start new tasks.
-Complete current action, write memories, write pulse, write handoff,
-restart.
+**55%+ -- Critical zone** (`[CONTEXT CRITICAL: ...]`). Hard warning.
+Do not start new tasks. Update task.lock, write pulse entry, and
+restart. Every token counts.
 ```
 
 ### Why These Numbers Are Conservative
 
 You might think 55% is an aggressive critical threshold when the window does not compact until ~90%. There are two reasons for this:
 
-1. **Context rot.** Quality degrades well before compaction. By 55% on a 1M window, that is 550K tokens of conversation. The model is already losing fidelity on earlier content.
+1. **Context rot.** Quality degrades well before compaction. The model is already losing fidelity on earlier content well below the compaction threshold.
 
-2. **Buffer for wrap-up.** Writing a handoff, storing memories, and doing a clean restart takes tokens. If you wait until 80% to start wrapping up, you might hit compaction during the wrap-up process itself.
+2. **Buffer for wrap-up.** Writing a handoff, updating task.lock, and doing a clean restart takes tokens. If you wait until 80% to start wrapping up, you might hit compaction during the wrap-up process itself.
 
 Start conservative. Tune up based on observed quality, not theoretical capacity.
 
@@ -181,8 +184,12 @@ Two reasons to delegate earlier than pure efficiency math suggests:
 
 If a task is self-contained enough that a subagent *could* handle it,
 default to delegating -- even in the crossover zone where doing it
-inline might be slightly more token-efficient. Reserve the main
-session for judgment, synthesis, and conversation.
+inline might be slightly more token-efficient.
+
+Tasks touching 5+ independent files: strongly prefer parallel
+subagents over sequential inline processing.
+
+Reserve the main session for judgment, synthesis, and conversation.
 ```
 
 This is a bias, not a hard rule. Some tasks are faster inline. But when in doubt, delegate.
@@ -276,14 +283,35 @@ EOF
 
 The recovery subagent reads the full session transcript (which is on disk in the Claude Code project directory), extracts anything the compaction summary missed, and returns a brief to the main session. This is not perfect -- you still lose nuance -- but it catches the most important losses.
 
+## Task Lock: Continuity Across Restarts
+
+Context management is not just about reading less -- it is also about surviving the restarts that context pressure forces. A task lock is a small state file that carries task continuity across session boundaries.
+
+For any substantive task that spans more than a few turns, write a `task.lock` file at the start and delete it at completion:
+
+```
+TASK: Short task name
+STEP: Next concrete action (what to DO, not what you did)
+CONTEXT: Pointers to relevant docs (paths, sections)
+TIMESTAMP: ISO-8601
+```
+
+The `SessionStart` hook reads the lock file on every session start. If a non-stale lock exists (typically: under 24 hours old), it injects a resume directive -- the next session starts working immediately from where the previous one left off, not from zero orientation.
+
+The key discipline: **update STEP before restarting**. The wrap-up zone behavior (45-54%) should include "update task.lock with the next concrete step" -- that step is what carries the work forward. A stale or incomplete lock is worse than no lock, because it implies continuity that doesn't exist.
+
+Delete the lock when the task is finished or abandoned. The lock is the instruction to future sessions, not background context.
+
 ## Practical Guidelines
 
 ### Reading Files
 
 - **Below 30%**: read files normally
-- **30-44%**: prefer targeted reads (specific line ranges) over full file reads
-- **45%+**: use grep, head, and tail instead of full reads. Delegate file-heavy tasks to subagents.
-- **Never** read a file larger than ~5K tokens when above 45%
+- **30%+**: prefer `grep` and targeted reads (specific line ranges) over full file reads
+- **45%+**: delegate file-heavy tasks to subagents; use grep, head, and tail inline
+- **Never** read a file larger than ~5K tokens in the critical zone (55%+)
+
+Note: each file read is capped at 2,000 lines and truncation is silent -- you won't be warned when a file is cut off. For files you know are large, read in chunks using offset and limit parameters. Tool results over ~50K characters are also silently truncated; if a search returns suspiciously few results, narrow scope rather than assuming completeness.
 
 ### Tool Output
 
@@ -374,13 +402,13 @@ The bridge file is informational only -- never modify it from inside a session. 
 
 ## Tuning
 
-Start with these thresholds and adjust based on observation:
+Start with these thresholds and adjust based on observation. All values are percentage-based -- they apply regardless of nominal window size, which varies by model:
 
 | Threshold | Starting Value | Adjust Up If... | Adjust Down If... |
 |-----------|---------------|-----------------|-------------------|
 | Awareness | 30% | Quality is fine at 40%, you want less noise | Agent makes errors referencing earlier context |
 | Wrap-up | 45% | You consistently wrap up cleanly at 50% | Compaction has happened despite warnings |
-| Critical | 55% | Buffer math works out (enough room for handoff) | Compaction keeps happening |
+| Critical | 55% | Buffer math works out (enough room for handoff + task.lock) | Compaction keeps happening |
 | Compaction | 90% | Never -- this is a safety net, not a target | -- |
 
 The autocompact percentage is set via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`. Setting it to 90 gives you 10% buffer between the critical threshold and actual compaction. This buffer exists so the agent can write its handoff and restart cleanly.

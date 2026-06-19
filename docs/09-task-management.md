@@ -32,6 +32,8 @@ turns out to be simpler than bidirectional sync.
     upgrade-dependencies.md
     fix-serial-timeout.md
 
+~/.agent/state/task.lock  # Mid-task resume state (one active task at a time)
+
 scripts/task-index.py     # Builds startup index + reconciles with external system
 
 External system           # Display layer (Apple Reminders, Todoist, etc.)
@@ -43,12 +45,14 @@ The data flow is:
 1. Agent creates a task file and optionally mirrors it to the external system.
 2. On each session startup, `task-index.py` reads all task files, builds a slim
    index, and checks the external system for discrepancies.
-3. The index is injected into the session as startup context.
+3. The index (plus any active task lock) is injected into the session as startup
+   context.
 4. The agent works from the index during the session, updating files as needed.
 
 ## Task File Format
 
-Each task is a markdown file with YAML-style frontmatter:
+Each task is a markdown file with YAML frontmatter followed by freeform
+markdown body -- context, steps, commands, notes:
 
 ```markdown
 ---
@@ -113,28 +117,30 @@ backlog ──→ pending ──→ active ──→ completed
                 └──→ cancelled
 ```
 
-- **backlog** — No timeline. "Build this someday." Stays out of the priority
+- **backlog** -- No timeline. "Build this someday." Stays out of the priority
   sort until promoted.
-- **pending** — Planned. Has a date or a trigger condition. Shows in the startup
+- **pending** -- Planned. Has a date or a trigger condition. Shows in the startup
   index.
-- **active** — Currently being worked on. Only a few tasks should be active at
+- **active** -- Currently being worked on. Only a few tasks should be active at
   once.
-- **blocked** — Waiting on something external (hardware delivery, API access,
+- **blocked** -- Waiting on something external (hardware delivery, API access,
   another person). Include what it's blocked on in the file body.
-- **completed** — Done. Keep the file for one reflection cycle, then archive or
+- **completed** -- Done. Keep the file for one reflection cycle, then archive or
   delete.
-- **cancelled** — Dropped. Same retention as completed.
+- **cancelled** -- Dropped. Same retention as completed.
 
 ### When to Create Tasks
 
 Not everything is a task. Use this heuristic:
 
 - **Create a task** for commitments that span multiple sessions, have due dates,
-  or the operator would want to see on their phone.
+  or the operator would want to see on their phone or watch.
 - **Don't create tasks** for single-session work, trivial fixes, or things
   tracked elsewhere (like git issues for code work).
 
-The goal is a task list that's useful, not comprehensive.
+The goal is a task list that's useful, not comprehensive. If it'll be done
+this session and doesn't need external visibility, it's not a task. It's
+just work. Use the task lock (below) for mid-session state instead.
 
 ## The Startup Index
 
@@ -271,10 +277,12 @@ file.
 ### Calling from the Startup Hook
 
 In your `session-startup.py` (or equivalent), call the index script and include
-its output in the injected context:
+its output in the injected context. If there is an active task lock, inject it
+too -- the agent needs both the broad task picture and the specific resume point:
 
 ```python
 import subprocess
+from pathlib import Path
 
 def get_task_index():
     result = subprocess.run(
@@ -285,18 +293,29 @@ def get_task_index():
         return result.stdout.strip()
     return None
 
+def get_task_lock():
+    lock = Path.home() / ".agent" / "state" / "task.lock"
+    if lock.exists():
+        return lock.read_text().strip()
+    return None
+
 # In your startup context builder:
 task_index = get_task_index()
 if task_index:
     context_parts.append(f"**Tasks:**\n{task_index}")
+
+task_lock = get_task_lock()
+if task_lock:
+    context_parts.append(f"## RESUME TASK\nStart working on STEP immediately.\n\n{task_lock}")
 ```
 
 ## Reconciliation with External Systems
 
 The most useful pattern is **file-authoritative, one-way sync with
 reconciliation**. The agent's task files are the source of truth. The external
-system (Apple Reminders, Todoist, a shared calendar) is a read-only display
-layer for the operator.
+system (Apple Reminders, Todoist, a shared calendar) is a display layer for
+the operator -- they see tasks on their phone or watch, and can mark them done
+or delete them there.
 
 ### Why Not Bidirectional Sync
 
@@ -368,6 +387,11 @@ should present them to the operator:
 Why? Because the operator might have completed the reminder for a reason the
 agent doesn't know about, or they might have created a reminder that doesn't
 need agent tracking. Auto-resolving would either lose tasks or create noise.
+
+This applies symmetrically in both directions:
+- Reminder deleted but task file still active → ask, don't auto-cancel
+- Reminder marked complete but task file active → ask, don't auto-complete
+- Reminder exists with no task file → offer to track, don't assume
 
 ## Creating Tasks
 
@@ -475,17 +499,21 @@ without ever warranting a task file.
 
 ### When to Use It
 
-- **Write a lock** for any task that spans more than a few turns — anything
+- **Write a lock** for any task that spans more than a few turns -- anything
   you'd mention in a handoff note. The cost is one small file; the payoff is a
   restart that loses nothing.
 - **Don't bother** for single-shot work: a quick question, a one-line fix, a
   message reply. The lock is overhead there.
 - **Update `STEP` as you go.** A lock whose `STEP` reflects what you finished an
-  hour ago resumes you in the wrong place — worse than no lock, because it reads
+  hour ago resumes you in the wrong place -- worse than no lock, because it reads
   as current.
 - **Delete it on completion.** A leftover lock from yesterday's finished task
   will try to resume work that's already done. (The staleness check is a
   backstop, not a substitute for cleaning up.)
+- **The lock is the instruction.** On startup with a fresh lock, start working
+  on `STEP` immediately. Do not present the lock and ask what to do. The
+  operator authorized this work in the previous session; re-confirming on every
+  restart defeats the point.
 
 ## Practical Tips
 

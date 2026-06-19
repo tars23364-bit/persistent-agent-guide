@@ -6,7 +6,7 @@ Architecture patterns and templates for building persistent AI agents with [Clau
 
 A reference guide documenting patterns that emerge when you run an AI agent as a persistent local system — not a one-off chat, but an always-available assistant with memory, scheduled tasks, voice, messaging, and OS integration.
 
-These patterns were developed through months of daily use with Claude Code (Opus/Sonnet, early 2026). They're opinionated, practical, and battle-tested. Some details may shift as Claude Code evolves — the architectural patterns should remain relevant.
+These patterns were developed through months of daily use with Claude Code (Opus/Sonnet, 2026). They're opinionated, practical, and battle-tested. Some details may shift as Claude Code evolves — the architectural patterns should remain relevant.
 
 ## What This Isn't
 
@@ -56,7 +56,7 @@ Developers who are already using Claude Code and want to push it beyond single-s
 Starter files to bootstrap your own agent:
 
 - [`templates/claude-md.md`](templates/claude-md.md) — CLAUDE.md boot loader
-- [`templates/rules/`](templates/rules/) — persona, protocols, safety, operator rule files
+- [`templates/rules/`](templates/rules/) — persona, protocols, safety, operator rule files (auto-loaded from `.claude/rules/`)
 - [`templates/hooks/session-startup.py`](templates/hooks/session-startup.py) — minimal startup hook
 - [`templates/skills/example-skill.md`](templates/skills/example-skill.md) — skill file template
 

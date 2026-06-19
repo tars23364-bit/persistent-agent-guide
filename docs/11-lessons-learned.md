@@ -141,6 +141,16 @@ can't see the conversation, and the agent can't see their execution. This means
 hook failures are silent unless you build logging into the hooks themselves.
 Always log hook execution to a file the agent can check if something seems off.
 
+**The most expensive non-obvious lesson:** Never trust a hook until you've
+verified it actually fires. Hook payloads arrive as stdin JSON — the env-var
+API (things like `$TOOL_EXIT_CODE`) does not exist in most runtime
+environments. Failing tools fire `PostToolUseFailure`, not `PostToolUse`. A
+misconfigured hook is a silent no-op: no error, no warning, just behavior that
+never happens. Every new or modified hook must demonstrate one verified firing
+— a live or simulated payload with an observed side effect — before you rely on
+it. Discovering that several hooks have been quiet no-ops since install is a
+bad day.
+
 ## The Operator Will Use Downstream Systems
 
 Design for the operator's workflow, not around it. This sounds obvious but it's
@@ -374,6 +384,14 @@ vanish with the session get written to the graph. The agent's recall improves
 steadily, and you don't notice until you compare the first week to the
 third month.
 
+A second non-obvious part: once the self-improvement loop is running, give the
+agent permission to apply routine improvements autonomously — cleaning up stale
+references, deduplicating prompts, promoting approved patterns. The alternative
+is an approval gate on every cleanup, which creates friction without adding
+safety. The boundary that matters is structural: the agent can improve things
+within the existing permission model, but can't change the permission model
+itself. Keep that line clear and routine maintenance can be autonomous.
+
 ## Scheduled Jobs Need Deduplication
 
 Every scheduled job (reflection, health checks, cleanup scripts) needs a
@@ -514,6 +532,65 @@ This isn't cosplay. The agent doesn't roleplay as the character. The character
 is a behavioral reference point that keeps the persona stable across sessions,
 context lengths, and topics.
 
+## launchd `unload` Is Session-Scoped — Disabling Is Different
+
+On macOS, `launchctl unload` (or `bootout`) does not survive a reboot. If
+your launchd job has `RunAtLoad` or `KeepAlive`, the OS resurrects it on the
+next boot regardless of whether you unloaded it in the current session. To
+durably disable a job, rename the plist to `.plist.disabled` — that stops the
+OS from loading it at all.
+
+A related trap: one-shot jobs can't clean themselves up. If you write a
+plist, launch it, and expect it to `bootout` its own label when done — that
+doesn't work. The SIGTERM that the OS sends to terminate the job kills the
+script before any cleanup lines run. The correct pattern is: `rm` the plist
+first, then `bootout`, then verify with `launchctl print` before the deadline.
+
+These are the kinds of bugs that only surface on the second reboot. Build your
+scheduled-job tests to include a reboot cycle.
+
+## Time-Boxed State Needs a Mechanical Expiry
+
+Any flag or mode that's intended to be temporary — "dry-run for three days,"
+"away mode through Sunday," "quiet until the deployment is done" — will
+outlive its window unless something mechanical reverts it.
+
+Prose in a configuration file ("this is temporary, revert after April 15th")
+is not a mechanism. The prose will still be there in June. The agent that
+reads it won't know the date passed unless something checks.
+
+Two patterns that work:
+
+- **Consumer-side expiry.** The code that reads the flag checks `mtime` or a
+  stored expiry timestamp and ignores the flag if it's past. This is the
+  preferred pattern — the expiry logic lives next to the thing being gated.
+- **Reminder at creation.** For flags that are hard to add consumer-side
+  expiry to, create a dated reminder (calendar event, Apple Reminder, or
+  scheduled agent check) at the same time as the flag. The reminder fires;
+  you revert manually.
+
+If you have neither, the flag is permanent no matter what the comment says.
+
+## Verify Before Persisting
+
+Automated agents make assertions: a health check declares a service down, a
+classifier labels an item, a status updater writes a new state. Most of the
+time, these assertions are correct. When they're wrong and the wrong value
+gets written to durable state, the cost is high — a false alarm that woke
+someone up, a misclassified record that propagates downstream, a status value
+that misleads the next session.
+
+The discipline that prevents this is **verify before persisting**: before
+writing a significant assertion to durable state (file, memory graph,
+notification queue), run a second check that either confirms or contradicts
+the first. The second check doesn't need to be sophisticated — often it's just
+reading the same signal through a different tool.
+
+Track these catches. When an automated step was about to assert something
+wrong and a verification step caught it, that's worth logging — not as an
+error, but as a saved outcome. Over time these logs reveal which automated
+steps need more robust verification and which are trustworthy.
+
 ## The Things That Didn't Work
 
 For completeness, here are ideas that sounded good but didn't survive
@@ -607,8 +684,10 @@ produced the most value per unit of effort:
 9. **Graph memory.** When you find yourself wishing the agent could recall
    past decisions semantically.
 
-10. **Self-improvement.** Learnings log, reflection cycle, pattern promotion.
-    This is a long game — it pays off over months.
+10. **Self-improvement.** Learnings log (LEARNINGS.md, ERRORS.md,
+    FEATURE_REQUESTS.md, HEALS.md), reflection cycle, pattern promotion,
+    self-upgrade autonomy within bounds. This is a long game — it pays off
+    over months.
 
 11. **Voice.** TTS daemon first, then push-to-talk, then wake word. Each
     layer is independently useful.

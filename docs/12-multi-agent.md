@@ -582,6 +582,223 @@ That is the multi-agent payoff in one sentence: **the peer trades time for depth
 out of the primary's context, and the primary trades the peer's raw notes for a
 synthesized answer the operator actually wants.**
 
+## Parallel Sub-Agent Fan-Out for Context Protection
+
+Before reaching for a second *persistent* agent, consider what parallel
+sub-agents can do -- and do it first. The delegation bias from
+[Context Management](./03-context-management.md) applies here: delegate to
+sub-agents earlier than pure efficiency math would suggest. The payoff is
+context protection for the main session, not just parallelism.
+
+The concrete rule: tasks touching five or more independent files strongly prefer
+parallel sub-agents over sequential inline processing. Spin them concurrently in
+a single turn, let each return a tight summary, synthesize the summaries in the
+main session. The main session never sees the raw tool noise -- only the
+distilled result.
+
+Sub-agents launched from the main session with `claude -p` are isolated OS
+processes. They can perform multi-step work, write results to a file, and notify
+via push notification or tmux injection on completion. What they cannot do is
+reschedule themselves or register durable background tasks -- that path is
+structurally broken because a `claude -p` process never enters an idle REPL. If
+a task must *recur* across sessions, a sub-agent is the wrong tool; that's a
+launchd worker or a second persistent agent. But for a bounded burst of parallel
+work within a single operator request, fan-out sub-agents are the right answer
+and cost no standing infrastructure.
+
+The division of labor this enables in a two-agent setup is equally real: the
+peer agent handles topic-specific deep work (research cycles, dossiers,
+background fetches); the primary keeps the household-wide perspective and handles
+everything only it can reach (push notifications, device APIs, calendar, synthesis
+for the operator). That division works whether the peer is a second Claude Code
+session or a different harness entirely -- the point is that it is *out of the
+primary's context*, not that it is running on identical software.
+
+## Peer Liveness and Recovery
+
+An async message broker tells you a message was delivered. It does not tell you
+whether your peer is alive. When a peer goes silent mid-cycle its room messages
+queue into the void, the primary keeps waiting for field notes that will never
+arrive, and neither side knows the other is down. A peer watchdog closes that
+gap.
+
+The pattern is a bidirectional heartbeat between the two agents, with a tiered
+recovery ladder when liveness breaks.
+
+### The Heartbeat
+
+Each agent runs a small daemon that:
+
+- **Pushes** a pulse to the other peer on a fixed interval (e.g., every 30s)
+  with basic health metadata: uptime, agent process alive, load, active workers.
+- **Receives** incoming pulses and updates a local state file (`peer-status.json`).
+- Flips to `DEGRADED` when pulses arrive late (network flap or load spike) and
+  to `SILENT` when no pulse arrives within a longer threshold (e.g., 3x the push
+  interval).
+
+**Transport**: HTTP POST on a fixed port over the private network overlay. Plain
+HTTP is fine -- the mesh VPN provides the trust boundary; there is no need for
+TLS between peers on the same VPN.
+
+State machine per peer:
+
+```
+UP ─── missed pulse ───> DEGRADED ─── silent threshold ───> SILENT
+                                                               │
+                                    ┌──────────────────────────┘
+                                    ▼
+                              RECOVERING ──── pulse received ───> UP
+                                    │
+                                    └──── no pulse in window ───> (escalate)
+```
+
+The state file is the runtime API. Both agents read it to know whether the other
+is available. The primary agent reads it before sending a room message; if the
+peer is `SILENT`, the send is suppressed or parked -- no point queuing into the
+void.
+
+### Behavioral Degradation
+
+When a peer goes `SILENT`, the still-up side adjusts:
+
+- **Primary goes silent**: the peer stops producing output that requires the
+  primary's review (field notes that need synthesis, study cycles whose results
+  nobody will read). It continues passive background work. On the primary's
+  return, it posts a digest: "while you were down, N findings parked, M cycles
+  deferred."
+- **Peer goes silent**: the primary suppresses room messages targeted to it,
+  posts a status item ("peer silent since X"), and skips any operation that
+  requires the peer's confirmation.
+
+This is graceful degradation rather than a hard stop: each side continues the
+work it can do alone, parks what it cannot, and hands back a clean summary when
+the other returns.
+
+### Soft Recovery via SSH
+
+When the peer has been `SILENT` longer than a recovery threshold (e.g., 10
+minutes) *and* the machine is still reachable on the network (the process
+crashed, not the host), attempt a soft recovery:
+
+1. SSH to the peer machine.
+2. Run a per-peer recovery script: restart the agent's tmux session and
+   background workers.
+3. Mark state as `RECOVERING` and wait for an incoming pulse within a recovery
+   window (e.g., 3 minutes).
+4. On pulse: clear to `UP`. On no pulse: escalate.
+
+Cooldown prevents loops: one soft recovery attempt per cooldown window (e.g.,
+30 minutes). Repeated SSH failures within the cooldown go straight to escalation.
+
+If the direction is reversed -- the peer recovering the primary machine -- the
+recovery policy should be tiered by whether the operator is active:
+
+- **Overnight / idle**: recover immediately, notify after.
+- **Day + idle** (operator hasn't touched the session recently): recover
+  immediately, notify after.
+- **Day + active** (operator was active recently): send a warning notification,
+  poll for a cancel reply, then recover if not cancelled.
+
+The tier logic uses the operator-activity timestamp -- a Stop hook updates it on
+every assistant turn -- as the activity proxy.
+
+### Hard Reboot via Smart Plug (Optional)
+
+For environments where the peer machine can go fully unresponsive (not just the
+agent process), a network-controlled power outlet adds a final recovery tier.
+This should be treated as an opt-in, gated by explicit policy.
+
+Required preconditions (all must hold):
+
+1. Peer has been `SILENT` beyond a hard threshold (e.g., 60 minutes).
+2. Soft recovery has already failed at least once in the current outage.
+3. The host itself is unreachable on the network (machine is genuinely wedged,
+   not just the agent process).
+4. A cooldown has elapsed since the last hard cycle (e.g., 4 hours), preventing
+   reboot loops on hardware faults.
+5. Policy enables hard reboot for that peer -- opt-in per peer, not a default.
+6. If outside an approved autonomous time window, the operator has confirmed.
+
+**Never auto-cycle during a WAN outage.** If internet is down, the operator
+cannot receive the pre-cycle notification and cannot cancel. Fail closed: require
+explicit confirmation before any hard reboot when WAN is unreachable.
+
+Even inside the approved window, send a notification with a cancel window (e.g.,
+60 seconds) before cutting power. Log every hard-cycle attempt with the full
+conditions that triggered it. Cap cycles per day and require manual unblock after
+the cap is hit.
+
+The primary machine should have hard reboots disabled by default -- the primary
+is the operator's working machine, and remote power-cycling it without operator
+involvement is high blast-radius.
+
+### Watchdog-of-the-Watchdog
+
+The heartbeat daemon itself can crash. It needs a liveness check of its own.
+The simplest approach: the daemon writes a `last_tick` timestamp every N seconds
+to a state file; the existing health worker (the 30-minute cardiac cycle) checks
+whether that timestamp has grown stale. If the heartbeat daemon dies, the health
+check fires within one cycle and alerts the operator. This is the "turtles only
+go down two levels" stopping rule: if the kernel and process supervisor are both
+dead, you have bigger problems.
+
+## Mixed-Harness Peers
+
+A second persistent agent does not have to run the same software as the primary.
+The room channel, the heartbeat daemon, and the consent-gate protocol are all
+harness-agnostic: they communicate over HTTP and WebSocket, not through
+Claude Code internals. A peer running a different agent framework (OpenClaw,
+Codex CLI, a vLLM-backed harness) is a first-class participant as long as it
+can:
+
+- POST to and poll from the room broker.
+- Expose an HTTP endpoint for incoming heartbeat pulses.
+- Run recovery and room-guard scripts that the other peer can invoke via SSH.
+
+The primary agent's room-send helper needs no changes. The drain command's
+dispatch table needs no changes. The consent-gate skill needs no changes. The
+only harness-specific adaptation is the per-peer recovery script -- it knows how
+to restart *this peer's* services, whatever those are (systemd units, tmux
+sessions, npm processes).
+
+This means you can evolve the peer's harness independently of the primary's.
+You can also run a different model family on the peer without any changes to the
+coordination layer. The room is the interface; the internals are each agent's
+own business.
+
+## Multi-Model Decision Bench
+
+A distinct multi-agent pattern that serves a different purpose: **comparing
+how multiple models reason about the same decision.** Rather than distributing
+work across agents, the bench fans the same problem to N model endpoints in
+parallel, collects their answers, and surfaces disagreement.
+
+The use case is calibration, not throughput: when a decision is consequential
+or when you want to check whether your primary agent's judgment is
+idiosyncratic, route it through the bench and see where the models converge
+and where they diverge. Consensus is confidence; divergence is signal worth
+examining.
+
+A minimal bench is a few dozen lines of Python:
+
+1. Read a `problem.md` describing the decision context and question.
+2. Fan to N configured endpoints concurrently (each with the same or
+   parameterized context wrapping).
+3. Collect raw responses. Optionally, run a cheap parsing model over each
+   to extract structured fields: decision, reasoning summary, caveats.
+4. Write a `SUMMARY.md` verdict matrix and per-model response files.
+
+The critical design call is context wrapping. **Anchored runs** send the
+problem alongside the primary agent's rules, memory, and standing orders --
+testing how each model behaves *as your agent*. **Bare runs** send the problem
+alone -- testing raw model judgment without your scaffolding. Both are
+informative; the bare-vs-anchored delta is itself a useful signal.
+
+This is not a guardrail (the primary's decisions don't route through the bench
+in practice) and not a debate (models answer independently, no cross-model
+discussion). It is an investigative tool for the operator: a way to spot-check
+the primary agent's reasoning against the current model landscape.
+
 ## Common Mistakes
 
 **Building this before the single agent is solid.** The biggest one, and the one
@@ -623,3 +840,14 @@ of truth for message durability.
 is as bad as a dropped operator notification. Make `room-send` exit nonzero and
 echo the message ID, and wire `[PEER-DOWN]` into your health/escalation system so
 the primary notices when its peer falls over.
+
+**Skipping the behavioral degradation layer.** If neither agent adapts when the
+other goes silent, the still-up side keeps producing output nobody reads and
+queuing messages into the void. Graceful degradation -- parking output, tracking
+state, handing back a digest on reconnect -- is what makes a two-agent system
+survive real outages cleanly.
+
+**No watchdog-of-the-watchdog.** The heartbeat daemon is itself a process that
+can crash. If it dies silently, both agents lose liveness awareness and neither
+knows. A 30-second `last_tick` touch plus an existing health check that reads
+it is the minimum viable backstop.
