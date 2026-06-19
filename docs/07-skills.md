@@ -602,6 +602,54 @@ Skills stack. If the operator asks a machining question that involves
 safety-critical parameters, both the machining skill and the safety rules
 apply simultaneously.
 
+## Worked Examples: Battle-Tested Skill Patterns
+
+Most skills are domain knowledge — what the agent knows about *your* machining
+shop, *your* medical history, *your* codebase. Those don't generalize, and you
+shouldn't try to copy them. But a handful of skills are *behavioral* — they
+encode how the agent should reason, not what it knows — and those travel well.
+Three that have earned their place through heavy use are included as starter
+templates in `templates/skills/`. Each is invoked as a slash command and each
+exists to counter a specific, predictable failure mode.
+
+### Anti-Sycophancy ([`anti-sycophancy.md`](../templates/skills/anti-sycophancy.md))
+
+A session-scoped switch that turns off softening and turns on direct, calibrated
+assessment: correct errors immediately, say "I don't know," challenge flawed
+premises, match confidence to certainty, stop when done. **Failure mode it
+counters:** instruction-tuned models drift toward agreement, and an agent that
+agrees with everything launders your bad ideas back to you with a confident
+tone. Making it an explicit *mode* (rather than the default) keeps directness
+available on demand without making every routine exchange abrasive.
+
+### Devil's Advocate ([`devils-advocate.md`](../templates/skills/devils-advocate.md))
+
+A structured adversarial debate before a high-stakes commit: one sub-agent
+builds the strongest case *for* a proposal, a second sub-agent (running with the
+anti-sycophancy directive and **forbidden from agreeing**) tears it apart, and
+the main agent synthesizes the tension for you to decide. **Failure mode it
+counters:** a single agent reasoning alone rationalizes — especially when you're
+excited about the idea. Two adversarial roles can't. The hard rule is that the
+adversary is never allowed to conclude "actually this is fine"; the moment it
+can, the protocol collapses into the rationalization it exists to prevent.
+
+### Quarantine Scout ([`quarantine-scout.md`](../templates/skills/quarantine-scout.md))
+
+Untrusted external content (a repo, a package, a URL) is analyzed in a sandboxed
+container by a *different, local* model first; only a structured report — never
+the raw content — reaches the main agent, and a plan-mode sub-agent audits that
+report before the agent trusts it. **Failure mode it counters:** an agent with
+real authority is a prompt-injection target, and the moment it reads a hostile
+README that payload is in its context. Sandbox isolation plus model diversity
+plus an audit pass are three independent barriers between "untrusted input" and
+"trusted context."
+
+The common thread: each is a small, explicit ritual that makes a known cognitive
+or security weakness harder to walk into. They compose — the devil's-advocate
+adversary runs *with* anti-sycophancy active, and the scout leans on the same
+plan-mode sub-agent pattern as the debate. Adapt the paths and model choices to
+your setup; the structure is what matters.
+
 ## Scaling Considerations
 
 For a personal agent with 3-5 domains, the skill system described here works
