@@ -571,6 +571,19 @@ Define how the agent handles health issues:
 
 This prevents the agent from endlessly retrying a fix that requires human intervention, and it prevents it from bothering the operator with issues it can fix itself.
 
+### Interoception: A Granular Vitals Feed
+
+The 30-minute health check is a *sentinel* -- it asks "is anything broken right now?" and stays silent otherwise. It is binary and coarse by design. A second, complementary pattern is worth adding once the system is stable: a higher-cadence **vitals** collector that does not just alarm, but continuously publishes the machine's state as data other systems read.
+
+The distinction is sentinel vs. feed:
+
+- The **sentinel** (cardiac cycle, 30 min) runs from outside tmux, owns worker-liveness and self-heal, and injects an alert only on failure.
+- The **vitals feed** (e.g. 60-second cadence) measures the body -- disk on the volume that matters, memory pressure, liveness of a local model server, uptime -- and writes a **tiered status JSON** (GREEN / AMBER-advisory / RED) to a state file. It pushes a notification only on RED, with a long re-notify cadence per check so a persistent-but-known condition does not nag.
+
+Keeping them separate matters: the sentinel stays a lean liveness backstop, while the feed becomes a state surface that the startup hook, the morning brief, and a status tile can all read cheaply without re-running the checks themselves. Route the feed's alerts through the *same* notification layer as everything else (one cooldown ledger, one away-mode gate) rather than letting it embed its own credentials and bypass the shared throttle.
+
+One special sample earns its own consumer. Run the collector **once at boot** (`RunAtLoad`) and have it write a `boot_event.json` with `acknowledged: false`. The startup hook reads this to distinguish *the machine just came up from a real shutdown* (workers may not be running yet, in-flight tasks were interrupted) from an ordinary session refresh -- the cold-boot recovery signal described in [Memory](02-memory.md#context-injection-the-startup-hook). The same flag-don't-decide rule applies: the collector records body state; deciding what to do about a degraded disk or a dead model server is the agent's call, not the worker's. This is the host-side twin of the [memory-health monitor](02-memory.md#monitoring-memory-health) -- together they are the agent's interoception: an outside measurement of its own state, kept honest precisely because self-report from the inside is unreliable.
+
 ## Nightly Scheduled Restart
 
 A scheduled nightly shutdown and wake cycle gives you a clean slate every day: fresh session, memory consolidated, git pushed, workers restarted. It also forces you to build a system robust enough to survive restarts -- which is the same robustness you need for crash recovery.

@@ -126,6 +126,20 @@ MEMORY.md should stay short -- ideally under 200 lines. If it is growing beyond 
 
 The promotion protocol (below) prevents this rot.
 
+### Monitoring Memory Health
+
+The promotion protocol is a *manual* discipline -- it runs when the agent restarts and remembers to scan. Discipline decays. The file that is "always loaded" is exactly the one whose growth nobody notices, because every session pays the cost a little at a time. By the time startup feels slow, the rot is months deep.
+
+So measure it mechanically. A small background worker -- a launchd job on a slow cadence (every few minutes is plenty; the file changes rarely) -- watches the memory file for three distinct failure modes that no single metric catches:
+
+- **Size.** A token estimate (`len(raw) // 4` is close enough) against advisory and hard thresholds. This is the obvious one and the least useful -- by the time the file is *big*, you already feel it.
+- **Growth.** Current size against a *baseline snapshot* captured right after the last clean-up. A file that is 3,000 tokens and stable is healthy; a file that is 3,000 tokens and was 1,800 a week ago is rotting. Growth catches the trend before the absolute size trips an alarm. Re-baseline after every audit so growth is measured against your own clean state, not against zero.
+- **Semantic redundancy.** Split the file into blocks (bullets, paragraphs, headings), embed each one with a local embedding model, and cluster pairs whose cosine similarity exceeds ~0.90. This surfaces the *same fact restated five ways* -- the single most common bloat pattern, and the one size and growth are both blind to, because five paraphrases of one fact look exactly like five distinct facts to a byte counter. Cache the per-block embeddings by content hash so each run only re-embeds what changed, and skip the whole pass when the file is byte-for-byte unchanged since the last sample.
+
+**The collector flags; it does not decide.** This is the load-bearing rule. The worker's job ends at writing a tiered status (GREEN / AMBER-advisory / RED) to a state file. Acting on it -- culling stale entries, promoting a status block into a project README, merging the five paraphrases -- is the agent's call at the next restart or in conversation, not the worker's. A background process that silently rewrites the agent's own working memory is a far worse failure than a bloated file. Doc-bloat is ambient context, not a 3 AM interrupt: surface it where the agent will see it anyway (startup injection, a status tile), and leave the push notifications for things that are actually on fire.
+
+The irony worth internalizing: an agent can be asked *"is my memory file healthy?"* and answer confidently from a file it can no longer fully load, because the file outgrew the read budget. Interoception -- the agent measuring its own state from the outside -- exists precisely because self-report from the inside is unreliable. The same pattern applied to the *host* (disk, memory pressure, service liveness) is covered in [OS Integration](04-os-integration.md#interoception-a-granular-vitals-feed).
+
 ## L2: Graph Memory (Long-Term Storage)
 
 L2 is the durable layer. It handles knowledge that is *sometimes* relevant -- operator preferences, past decisions, system facts, debugging insights. The agent queries it on demand rather than loading it into every session.
