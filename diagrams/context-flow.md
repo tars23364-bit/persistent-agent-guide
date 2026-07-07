@@ -72,4 +72,4 @@ The bridge file is written by the statusline hook and read by the threshold hook
 
 **Parallel where possible, sequential where necessary.** Scripts that don't depend on each other can run concurrently. Background tasks (backfills, prefetches) are spawned as subprocesses and don't block startup.
 
-**Thresholds are percentage-based, not absolute.** The context health pipeline uses `used_pct` from the bridge file, not raw token counts. This makes the system model-agnostic -- a threshold of 30% means the same thing whether the window is 200K or 1M tokens.
+**Thresholds are absolute token counts, not percentages.** The context health pipeline compares `used_tokens` from the bridge file against fixed marks (~250K/350K/450K on a 1M reference), because context rot tracks absolute depth, not fraction of window -- 30% of a 1M window is deep in the degradation zone while 30% of a 200K window is nowhere near it. A separate ceiling check (percentage-based, because compaction is) covers small-window models whose whole window sits below the first mark. See the Context Management chapter for the research basis and calibration discipline.
