@@ -698,7 +698,7 @@ Here is how a complete session lifecycle works with all the OS integration piece
 3. CONVERSATION
    └─ each turn:
        ├─ UserPromptSubmit hooks fire:
-       │   ├─ context-threshold.sh: injects warnings at 30/45/55%
+       │   ├─ context-threshold.sh: injects warnings at absolute token marks (~250K/350K/450K)
        │   └─ session-elapsed.sh: nudges reflection if session is long
        ├─ agent responds
        ├─ Stop hooks fire:
