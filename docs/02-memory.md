@@ -231,18 +231,19 @@ After every substantive response, the agent runs a decision tree:
 
 3. **Is it worth storing?** The test: would rebuilding this knowledge from scratch cost more than storing and recalling it? If the answer is derivable from a config file or git log, do not store it.
 
-4. **Delegate the write.** Do not run `agent-memory remember` in the main conversation thread. Batch all writes from a single turn into one sub-agent call. Pass the content and metadata (category, importance, entities) -- not raw CLI commands. The sub handles mechanical execution; the main thread handles judgment.
+4. **Hand the write to one mechanical path.** Do not run `agent-memory remember` in the main conversation thread, and do not hand a sub-agent a free-form brief and let it compose the CLI call. The main thread authors one payload per insight (content, category, importance, entities) into a queue directory; a single worker drains the queue through a wrapper that always disables diff-replacement, refuses low importance unless the payload is marked ephemeral, and verifies after writing that the new row is live and no overlapping row was deleted. The main thread handles judgment; the wrapper handles execution. This replaced "batch writes into one sub-agent call" after four incidents in which a writer sub-agent's additive intent still let the engine soft-delete a sibling insight.
 
 Write classes:
 - **APPEND** -- new fact, no prior overlap. Sub writes directly.
-- **APPEND-CORRECTION** -- supersedes stale state. Compose the corrected fact in the main turn; sub writes the new entry and links it to the stale one. The built-in diff handles near-match auto-replacement; the explicit link adds graph traceability.
+- **APPEND-CORRECTION** -- supersedes stale state. Compose the corrected fact in the main turn; the write path stores the new entry and links it to the stale one with an explicit supersession edge. **Never rely on the engine's built-in diff to do the replacement.** Near-match auto-replacement silently soft-deletes whatever the engine judges superseded, and additive intent does not protect the neighbor; every write goes through with diffing disabled, and the corrective link is written on purpose.
 - **DESTRUCTIVE FORGET** -- hard expunge of wrong or sensitive data. Gate this: get operator acknowledgment before the sub runs the delete.
 
 Importance guidelines:
 
 - Operator preferences, decisions, corrections: importance 4-5
-- System facts, configuration discoveries: importance 3-4
-- Background context: importance 2
+- System facts, configuration discoveries: importance 4 (3 if you are fine losing it)
+- Background context: importance 2-3
+- Importance is lifetime, not just rank: with auto-prune on, anything below 4 with little access is reaped within days, unlogged in older engines. Below 4 means ephemeral; write it that way on purpose or not at all.
 - Never store secrets, passwords, API keys, or transient noise
 
 ## The Promotion Protocol
